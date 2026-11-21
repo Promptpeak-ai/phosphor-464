@@ -1,0 +1,1528 @@
+PHOSPHOR 464: kommentiertes Assemblerlisting
+Zeile bezeichnet src/phosphor464.asm; Adressen und Bytes sind hexadezimal.
+Bytes stammen aus der fertig assemblierten BIN. Der Quelltext liefert die Mnemonik.
+us zeigt RASMs CPC-NOP-Einheiten je Befehl; Sprungpfade separat bewerten.
+Bei REPEAT nennt xN die Anzahl, die Byte-Spalte zeigt den Anfang der Expansion.
+Tabellendaten bleiben als INCBIN/INCL48 lesbar; ihre Labels tragen die Startadresse.
+Der LZ48-Entpacker folgt im Anhang mit seinem Originalquelltext.
+
+Zeile Adresse Bytes (Anfang)          us       Quelltext / Kommentar
+
+    1                                          ; PHOSPHOR 464: kommentierter Quelltext der vollstaendigen Demo
+    2                                          ; Ziel: Schneider/Amstrad CPC 464, 64 KiB RAM, Z80A, RASM-Syntax.
+    3                                          ; Startadresse #4000. Die Show endet mit einem stehenden Schlussbild.
+    4                                          ; Ein Reset fuehrt zur Firmware zurueck; die Demo restauriert kein BASIC.
+    5                                          ;
+    6                                          ; LESEHILFE
+    7                                          ; # bezeichnet Hexadezimalzahlen, alle anderen Zahlen sind dezimal.
+    8                                          ; LD A,(wert) liest ein Byte aus RAM; LD A,wert laedt die Konstante.
+    9                                          ; DW schreibt ein Wort als Lowbyte, Highbyte (Little Endian).
+   10                                          ; OR A prueft A und loescht Carry; vor SBC HL,DE verhindert es einen
+   11                                          ; unbeabsichtigten zusaetzlichen Abzug durch einen alten Carry-Zustand.
+   12                                          ; CALL legt die Ruecksprungadresse auf dem Stack ab; RET holt sie zurueck.
+   13                                          ; Die Effektroutinen duerfen Arbeitsregister veraendern. Jede Routine
+   14                                          ; richtet ihre benoetigten Register neu ein. Nur beschriebene Helfer
+   15                                          ; wie ay_write haben engere Vereinbarungen zur Registererhaltung.
+   16                                          ;
+   17                                          ; ABLAUF UND ZEITBASIS
+   18                                          ; scene: 0 Logo, 1 See, 2 Strasse, 3 Landschaft, 4 Mode-Wechsel,
+   19                                          ;        5 Schwarzweiss-Interferenz, 6 Finale.
+   20                                          ; main_loop wartet auf VSYNC, zeichnet einen Teil des Effekts, spielt
+   21                                          ; einen Musikschritt und aktualisiert Vorhang und Szenenzaehler.
+   22                                          ; DI bleibt aktiv. Die Show fragt VSYNC direkt am PPI ab; sie benutzt
+   23                                          ; weder den Firmware-Fast-Ticker noch einen eigenen Interrupt-Handler.
+   24                                          ; Standardbild: 312 Rasterzeilen * 64 us = 19968 us, etwa 50,08 Hz.
+   25                                          ; Ein NOP dauert im CPC 1 us. Die WAIT-Schaltung verlaengert viele
+   26                                          ; andere Befehle; reine Z80-Taktzahlen / 4 reichen zur Planung nicht.
+   27                                          ; Mode 2 baut ein Muster in 4 Frames auf, die Landschaft in 8 Frames.
+   28                                          ; Der Musikplayer erhaelt trotzdem in jedem Videoframe einen Aufruf.
+   29                                          ; Beim Szenenwechsel entpackt die CPU Daten ausserhalb dieses Takts.
+   30                                          ;
+   31                                          ; SPEICHERPLAN
+   32                                          ; #0000..#3fff: je Szene Wasserquelle, Strassenphasen, Scrolltext oder
+   33                                          ;              zweite Bildschirmseite fuer Landschaft / Mode 2.
+   34                                          ; #4000..program_end-1: Code, Arbeitsvariablen, Tabellen, LZ48-Daten.
+   35                                          ; #b800..#b83f: 16 Adresspaare fuer den POP-Lesestrom der Landschaft.
+   36                                          ; #bff0: Anfang des normalen Stacks, der zu kleineren Adressen waechst.
+   37                                          ; #c000..#ffff: erste Bildschirmseite; ROM-Overlays bleiben abgeschaltet.
+   38                                          ; Code und Tabellen liegen bei dieser Fassung in 28813 Bytes bis #b08c.
+   39                                          ;
+   40                                          ; BILDSPEICHER UND FARBEN
+   41                                          ; Zeilenoffset(y) = (y AND 7)*#800 + (y >> 3)*80.
+   42                                          ; Beispiel: y=0 -> #0000, y=1 -> #0800, y=7 -> #3800, y=8 -> #0050.
+   43                                          ; Dazu kommen Seitenbasis (#0000/#c000) und die Byte-Spalte (0..79).
+   44                                          ; Mode 0: ein Byte enthaelt zwei 4-Bit-Farbnummern, verschachtelt:
+   45                                          ; Bits 7,3,5,1 gehoeren zu Farbbit 0,1,2,3 des linken Pixels,
+   46                                          ; Bits 6,2,4,0 entsprechend zum rechten Pixel.
+   47                                          ; Mode 2: Bit 7 ist das linke von acht Pixeln, Bit 0 das rechte.
+   48                                          ; Eine Farbnummer/Pen waehlt einen Paletteneintrag. Erst dessen
+   49                                          ; Gate-Array-Farbcode bestimmt die RGB-Farbe. Codes #40..#5f sind
+   50                                          ; Hardwarewerte; sie entsprechen nicht den BASIC-INK-Farbnummern.
+   51                                          ;
+   52                                          ; I/O: OUT (C),A legt das volle BC auf den Z80-Adressbus.
+   53                                          ; #7fxx: Gate Array; #bcxx: CRTC-Registerwahl; #bdxx: CRTC-Daten.
+   54                                          ; #f4xx: PPI Port A / AY-Daten; #f5xx: PPI Port B / VSYNC in Bit 0.
+   55                                          ; #f6xx: PPI Port C / AY-Steuerleitungen; #f7xx: PPI-Steuerwort.
+   56                                          ; Die verwendeten Bausteine ignorieren hier die unteren Adressbits.
+   57                                          ; Deshalb kann OUT (C),C zugleich Port waehlen und C als Wert ausgeben.
+   58                                          ;
+   59                                          ; TABELLEN UND ENTWICKLUNGSWERKZEUGE
+   60                                          ; tools/make_assets.py erzeugt Grafik, Muster, Zeilenadressen und Noten.
+   61                                          ; tools/make_terrain.py erzeugt Hoehenkarte und Perspektivtabellen.
+   62                                          ; RASM komprimiert INCL48-Dateien beim Build. Der eingebundene
+   63                                          ; LZ48-Entpacker stammt von Edouard Berge aus tools/rasm/decrunch.
+   64                                          ; Hardware-Erlaeuterungen: docs/PINBELEGUNGEN.md, docs/QUELLEN.md,
+   65                                          ; docs/Z80A-UNDOKUMENTIERTE-OPCODES.md und docs/MODE-2-UND-INTERLACE.md.
+   66                                          ; Emulatorpruefung: CRTC 0/1/2; Originalrechner noch nicht geprueft.
+   67                                          ;
+   68                                                  org #4000
+   69                                                  run #4000
+   70                                          ; EINSTIEG: Bus und Firmwarezustand unter eigene Kontrolle nehmen.
+   71                                          ; DI sperrt maskierbare IRQs, damit die Firmware weder Palette noch
+   72                                          ; Register waehrend unserer zeitkritischen Routinen veraendert.
+   73                                          ; #8c = %10001100: Gate-Array-Modusregister, beide ROMs aus, Mode 0.
+   74                                          ; RAM unter den ROMs wird damit auch beim LESEN sichtbar. Schreibzugriffe
+   75                                          ; auf diese Adressen erreichen auf dem CPC ohnehin das darunterliegende RAM.
+   76                                          ; #82 am PPI: Mode 0, Port A und C Ausgaenge, Port B Eingang.
+   77                                          ; BFF0 bietet Platz fuer verschachtelte CALLs oberhalb der Arbeitstabellen.
+   78 4000                                     start:
+   79 4000    F3                      01               di                        ; Firmware-IRQs ab hier sperren
+   80 4001    31 F0 BF                03               ld sp,#bff0               ; eigenen Stack oberhalb von Code und Tabellen aufsetzen
+   81 4004    01 8C 7F                03               ld bc,#7f8c               ; B waehlt Gate Array, C enthaelt das Moduswort #8c
+   82 4007    ED 49                   04               out (c),c                 ; #8c ausgeben: Mode 0, unteres und oberes ROM aus
+   83 4009    21 06 49                03               ld hl,crtc_defaults
+   84 400C    1E 00                   02               ld e,0
+   85                                          ; R0 bis R13 der Reihe nach setzen. E zaehlt das Register, HL die Werte.
+   86                                          ; Der Wechsel B=#bc -> #bd laesst C unveraendert: Registerwahl, dann Daten.
+   87                                          ; R6 startet bei null; das Bild bleibt bis zum Oeffnen des Vorhangs schwarz.
+   88 400E                                     crtc_init:
+   89 400E    06 BC                   02               ld b,#bc
+   90 4010    ED 59                   04               out (c),e                 ; CRTC: Register E auswaehlen
+   91 4012    04                      01               inc b                     ; #bc -> #bd, zum Datenport wechseln
+   92 4013    7E                      02               ld a,(hl)
+   93 4014    ED 79                   04               out (c),a                 ; Tabellenwert in das ausgewaehlte Register schreiben
+   94 4016    23                      02               inc hl
+   95 4017    1C                      01               inc e
+   96 4018    7B                      01               ld a,e
+   97 4019    FE 0E                   02               cp 14                     ; Register 0 bis 13 sind nach 14 Werten fertig
+   98 401B    20 F1                   02               jr nz,crtc_init
+   99 401D    01 82 F7                03               ld bc,#f782               ; PPI-Steuerport #f7xx und Konfiguration #82
+  100 4020    ED 49                   04               out (c),c                 ; A/C als Ausgabe, B als Eingabe konfigurieren
+  101 4022    AF                      01               xor a                     ; A=0 fuer die folgenden Zustandsbytes
+  102 4023    32 BB 48                04               ld (scene),a
+  103 4026    32 BE 48                04               ld (phase),a
+  104 4029    32 C0 48                04               ld (beat_frame),a
+  105 402C    32 C1 48                04               ld (song_step),a
+  106 402F    32 BF 48                04               ld (finished),a
+  107                                          ; Einsprung auch fuer die Debug-Szenentests: scene muss bereits stimmen.
+  108                                          ; init_scene entpackt das Motiv und initialisiert die benoetigten Daten.
+  109 4032                                     scene_entry:
+  110 4032    CD F7 40                05               call init_scene
+  111                                          ; PRO FRAME: Auf eine neue steigende VSYNC-Flanke warten.
+  112                                          ; FRAME_SYNCED ist der Messpunkt der Tests. Der normale Stack steht hier
+  113                                          ; wieder auf #bff0, weil wait_vsync bereits mit RET zurueckgekehrt ist.
+  114 4035                                     main_loop:
+  115 4035    CD E1 40                05               call wait_vsync
+  116                                          ; Szene 5 laeuft durchgehend in Mode 2. Die anderen Szenen beginnen
+  117                                          ; in Mode 0; die Split-Szene schaltet erst innerhalb von raster_effect um.
+  118                                          ; Logo, Split und Finale teilen sich die Palette/Raster-Routine.
+  119 4038                                     frame_synced:
+  120 4038    3A BB 48                04               ld a,(scene)
+  121 403B    FE 05                   02               cp 5
+  122 403D    28 2B                   02               jr z,frame_moire
+  123 403F    01 8C 7F                03               ld bc,#7f8c
+  124 4042    ED 49                   04               out (c),c
+  125 4044    3A BB 48                04               ld a,(scene)
+  126 4047    FE 01                   02               cp 1
+  127 4049    28 1A                   02               jr z,frame_water
+  128 404B    3A BB 48                04               ld a,(scene)
+  129 404E    FE 02                   02               cp 2
+  130 4050    28 0E                   02               jr z,frame_road
+  131 4052    FE 03                   02               cp 3
+  132 4054    28 05                   02               jr z,frame_terrain
+  133 4056    CD 37 42                05               call raster_effect
+  134 4059    18 12                   03               jr frame_tail
+  135 405B                                     frame_terrain:
+  136 405B    CD 21 47                05               call terrain_effect
+  137 405E    18 0D                   03               jr frame_tail
+  138 4060                                     frame_road:
+  139 4060    CD 92 43                05               call road_effect
+  140 4063    18 08                   03               jr frame_tail
+  141 4065                                     frame_water:
+  142 4065    CD A2 42                05               call water_effect
+  143 4068    18 03                   03               jr frame_tail
+  144 406A                                     frame_moire:
+  145 406A    CD FE 43                05               call moire_effect
+  146                                          ; Gemeinsamer Nachlauf. Die Grafikarbeit muss samt Musik und Verwaltung
+  147                                          ; vor dem naechsten passenden VSYNC abgeschlossen sein. Sonst wartet
+  148                                          ; wait_vsync bis zur folgenden Flanke und die Show verliert einen Frame.
+  149                                          ; See, Strasse und Landschaft besitzen eigene Paletten; Mode 2 nutzt nur
+  150                                          ; zwei Pens. Deshalb erhalten nur Logo, Split und Finale das Bodenlicht.
+  151 406D                                     frame_tail:
+  152 406D    CD 5A 46                05               call music_tick
+  153 4070    3A BB 48                04               ld a,(scene)
+  154 4073    FE 05                   02               cp 5
+  155 4075    28 0D                   02               jr z,skip_floor
+  156 4077    FE 03                   02               cp 3
+  157 4079    28 09                   02               jr z,skip_floor
+  158 407B    FE 01                   02               cp 1
+  159 407D    28 05                   02               jr z,skip_floor
+  160 407F    FE 02                   02               cp 2
+  161 4081    C4 00 47                03               call nz,floor_tick
+  162                                          ; scene_frame ist ein 16-Bit-Zaehler je Szene; phase ein umlaufendes
+  163                                          ; 8-Bit-Animationsmass fuer die Show. Musikzaehler laufen ueber Szenen hinweg.
+  164                                          ; Der Vergleich zieht die Szenenlaenge ab: Carry bedeutet noch nicht fertig.
+  165                                          ; Nach Szene 6 folgt show_complete, statt wieder bei Szene 0 anzufangen.
+  166 4084                                     skip_floor:
+  167 4084    3A BB 48                04               ld a,(scene)
+  168 4087    FE 06                   02               cp 6
+  169 4089    CC 20 45                03               call z,scroll_tick
+  170 408C    3A BE 48                04               ld a,(phase)
+  171 408F    3C                      01               inc a
+  172 4090    32 BE 48                04               ld (phase),a
+  173 4093    2A BC 48                05               ld hl,(scene_frame)
+  174 4096    23                      02               inc hl
+  175 4097    22 BC 48                05               ld (scene_frame),hl
+  176 409A    CD 00 42                05               call shutter
+  177 409D    CD 1C 46                05               call ending_volume
+  178 40A0    2A BC 48                05               ld hl,(scene_frame)
+  179 40A3    ED 5B C9 48             06               ld de,(scene_length)
+  180 40A7    B7                      01               or a
+  181 40A8    ED 52                   04               sbc hl,de
+  182 40AA    DA 35 40                03               jp c,main_loop
+  183 40AD    3A BB 48                04               ld a,(scene)
+  184 40B0    3C                      01               inc a
+  185 40B1    FE 07                   02               cp 7
+  186 40B3    28 09                   02               jr z,show_complete
+  187 40B5    32 BB 48                04               ld (scene),a
+  188 40B8    CD F7 40                05               call init_scene
+  189 40BB    C3 35 40                03               jp main_loop
+  190                                          ; Alle drei AY-Lautstaerkeregister auf null setzen. ay_write erhaelt E,
+  191                                          ; daher gilt E=0 fuer R8, R9 und R10. R6=25 zeigt wieder alle 200 Zeilen.
+  192                                          ; finished=1 ist ein Statusbyte fuer Aufnahme und Tests, kein Hardwareflag.
+  193 40BE                                     show_complete:
+  194                                                  ; Der Schlussakkord klingt aus. Schlussbild bleibt stehen.
+  195 40BE    3E 08                   02               ld a,8
+  196 40C0    1E 00                   02               ld e,0
+  197 40C2    CD 00 46                05               call ay_write
+  198 40C5    3E 09                   02               ld a,9
+  199 40C7    CD 00 46                05               call ay_write
+  200 40CA    3E 0A                   02               ld a,10
+  201 40CC    CD 00 46                05               call ay_write
+  202 40CF    3E 19                   02               ld a,25
+  203 40D1    1E 06                   02               ld e,6
+  204 40D3    CD EE 40                05               call crtc_write
+  205 40D6    3E 01                   02               ld a,1
+  206 40D8    32 BF 48                04               ld (finished),a
+  207                                          ; Das Schlussbild bleibt im RAM und die Video-Hardware liest es weiter.
+  208                                          ; Die CPU wartet nur noch auf Bildwechsel; sie startet die Musik nicht neu.
+  209 40DB                                     end_hold:
+  210 40DB    CD E1 40                05               call wait_vsync
+  211 40DE    C3 DB 40                03               jp end_hold
+  212                                          
+  213                                          ; VSYNC-POLLING. Veraendert A, Flags und B; C darf beliebig sein.
+  214                                          ; PPI-Port B, Bit 0 liefert den CRTC-VSYNC. RRA schiebt dieses Bit in Carry.
+  215                                          ; Zuerst ein eventuell laufendes VSYNC abwarten, dann auf das naechste
+  216                                          ; VSYNC warten. Nur auf ein gesetztes Bit zu pruefen, lieferte waehrend
+  217                                          ; desselben Synchronimpulses mehrere scheinbare Bildanfaenge.
+  218                                          ; Die Abtastschleife erzeugt einige us Phasenstreuung. Die 64-us-Rasterfolge
+  219                                          ; ist innerhalb des Bildes konstant, ihr Start ist nicht auf einen CPU-Takt
+  220                                          ; zur Flanke festgelegt. HALT eignet sich hier bei gesperrten IRQs nicht.
+  221 40E1                                     wait_vsync:
+  222 40E1    06 F5                   02               ld b,#f5                  ; PPI-Port B; C spielt bei der Portauswahl keine Rolle
+  223 40E3                                     wait_vsync_end:
+  224 40E3    ED 78                   04               in a,(c)                  ; PPI-Eingaenge lesen
+  225 40E5    1F                      01               rra                       ; VSYNC-Bit 0 nach Carry
+  226 40E6    38 FB                   02               jr c,wait_vsync_end       ; solange der alte Syncimpuls noch aktiv ist
+  227 40E8                                     wait_vsync_start:
+  228 40E8    ED 78                   04               in a,(c)                  ; erneut den aktuellen PPI-Zustand lesen
+  229 40EA    1F                      01               rra                       ; das Eingangsbit nach Carry schieben
+  230 40EB    30 FB                   02               jr nc,wait_vsync_start    ; warten, solange noch kein neues VSYNC anliegt
+  231 40ED    C9                      03               ret
+  232                                          
+  233                                          ; A=Daten, E=CRTC-Register. Nur Standardregister, R8 bleibt null.
+  234                                          ; CRTC-HELFER. Eingabe: E=Registernummer, A=Wert. Veraendert BC.
+  235                                          ; A, DE und HL bleiben erhalten. INC B veraendert die Flags.
+  236                                          ; Aufrufer duerfen also Flags nicht ueber diesen Helfer hinweg verwenden.
+  237                                          ; R12/R13 adressieren CRTC-Zeichenwoerter, nicht direkt CPU-Bytes.
+  238                                          ; Mit R13=0 waehlt R12=#30 die CPU-Seite #c000, R12=0 die Seite #0000.
+  239                                          ; Der CRTC uebernimmt die Startadresse an seinem Bild-/Adressladepunkt.
+  240 40EE                                     crtc_write:
+  241 40EE    01 00 BC                03               ld bc,#bc00               ; Register-Auswahlport
+  242 40F1    ED 59                   04               out (c),e                 ; Registernummer aus E
+  243 40F3    04                      01               inc b                     ; Datenport #bd00; veraendert Flags
+  244 40F4    ED 79                   04               out (c),a                 ; neuer Registerinhalt aus A
+  245 40F6    C9                      03               ret
+  246                                          ; SZENENAUFBAU. Veraendert die Arbeitsregister; laeuft ausserhalb der
+  247                                          ; zeitkritischen Bildschleife. R6=0 verdeckt das Entpacken des neuen Motivs.
+  248                                          ; R13=0 stellt den Adressoffset zurueck, R12=#30 die Seite #c000.
+  249                                          ; Jedes Bild entpackt auf genau 16 KiB. Fuer den Tabellenzugriff gilt
+  250                                          ; Adresse = pictures + 2*scene, weil jeder Eintrag ein 16-Bit-Zeiger ist.
+  251                                          ; EX DE,HL bringt den gelesenen Quellzeiger in den Eingabeparameter HL
+  252                                          ; von LZ48_decrunch. DE=#c000 gibt dessen Ausgabeziel an.
+  253 40F7                                     init_scene:
+  254 40F7    3E 0F                   02               ld a,15
+  255 40F9    32 BA 48                04               ld (volume_limit),a
+  256 40FC    AF                      01               xor a
+  257 40FD    1E 06                   02               ld e,6                    ; R6: Anzahl sichtbarer Zeichenzeilen
+  258 40FF    CD EE 40                05               call crtc_write           ; A nach CRTC-Register E, BC wird veraendert
+  259 4102    AF                      01               xor a
+  260 4103    1E 0D                   02               ld e,13                   ; R13: unterer Teil der Bildstartadresse
+  261 4105    CD EE 40                05               call crtc_write           ; A nach CRTC-Register E, BC wird veraendert
+  262 4108    3E 30                   02               ld a,48                   ; #30 als oberer Teil fuer Bildseite #c000
+  263 410A    1E 0C                   02               ld e,12                   ; R12: oberer Teil der Bildstartadresse
+  264 410C    CD EE 40                05               call crtc_write           ; A nach CRTC-Register E, BC wird veraendert
+  265 410F    01 8C 7F                03               ld bc,#7f8c
+  266 4112    ED 49                   04               out (c),c
+  267 4114    3A BB 48                04               ld a,(scene)
+  268 4117    87                      01               add a,a                   ; scene*2 fuer die Tabelle aus Wortzeigern
+  269 4118    5F                      01               ld e,a
+  270 4119    16 00                   02               ld d,0
+  271 411B    21 FC 4C                03               ld hl,pictures
+  272 411E    19                      03               add hl,de
+  273 411F    5E                      02               ld e,(hl)
+  274 4120    23                      02               inc hl
+  275 4121    56                      02               ld d,(hl)
+  276 4122    EB                      01               ex de,hl                  ; gelesenen Bildzeiger in Entpacker-Parameter HL bringen
+  277 4123    11 00 C0                03               ld de,#c000
+  278 4126    CD 74 48                05               call LZ48_decrunch
+  279 4129    21 14 49                03               ld hl,initial_palette
+  280 412C    01 00 7F                03               ld bc,#7f00
+  281 412F    1E 00                   02               ld e,0
+  282                                          ; 16 Pens initialisieren: erst Pen-Nummer 0..15, dann Hardwarefarbcode.
+  283                                          ; Pen-Wahl 16 adressiert anschliessend den Rand; #54 setzt ihn schwarz.
+  284                                          ; Musikphase und globaler Effektzaehler bleiben beim Szenenwechsel bestehen;
+  285                                          ; scene_frame und die Position der Laufschrift beginnen dagegen bei null.
+  286 4131                                     palette_init:
+  287 4131    ED 59                   04               out (c),e
+  288 4133    7E                      02               ld a,(hl)
+  289 4134    ED 79                   04               out (c),a
+  290 4136    23                      02               inc hl
+  291 4137    1C                      01               inc e
+  292 4138    7B                      01               ld a,e
+  293 4139    FE 10                   02               cp 16
+  294 413B    20 F4                   02               jr nz,palette_init
+  295 413D    3E 10                   02               ld a,16
+  296 413F    ED 79                   04               out (c),a
+  297 4141    3E 54                   02               ld a,#54
+  298 4143    ED 79                   04               out (c),a
+  299 4145    3A BB 48                04               ld a,(scene)
+  300 4148    87                      01               add a,a
+  301 4149    5F                      01               ld e,a
+  302 414A    16 00                   02               ld d,0
+  303 414C    21 D8 48                03               ld hl,scene_lengths
+  304 414F    19                      03               add hl,de
+  305 4150    5E                      02               ld e,(hl)
+  306 4151    23                      02               inc hl
+  307 4152    56                      02               ld d,(hl)
+  308 4153    ED 53 C9 48             06               ld (scene_length),de
+  309 4157    21 00 00                03               ld hl,0
+  310 415A    22 BC 48                05               ld (scene_frame),hl
+  311 415D    22 C7 48                05               ld (scroll_pos),hl
+  312 4160    3A BB 48                04               ld a,(scene)
+  313 4163    FE 01                   02               cp 1
+  314 4165    20 16                   02               jr nz,init_not_water
+  315 4167    21 3D AD                03               ld hl,water_packed
+  316 416A    11 00 00                03               ld de,0
+  317 416D    CD 74 48                05               call LZ48_decrunch
+  318 4170    21 D2 48                03               ld hl,lake_colors
+  319 4173    01 00 7F                03               ld bc,#7f00
+  320 4176    1E 07                   02               ld e,7
+  321 4178    16 06                   02               ld d,6
+  322 417A    CD 16 47                05               call floor_next
+  323                                          ; Nur Szene 2 braucht die 32 Phasen der Fahrbahnmarkierung im unteren RAM.
+  324                                          ; 32 * 80 Zeilen * 4 Bytes = 10240 Bytes. Sonne und Berge bleiben im Motiv.
+  325                                          ; Die beiden anschliessenden Pen-Werte geben der Sonne feste Farben.
+  326 417D                                     init_not_water:
+  327 417D    3A BB 48                04               ld a,(scene)
+  328 4180    FE 02                   02               cp 2
+  329 4182    20 1C                   02               jr nz,init_not_road
+  330 4184    21 4D A9                03               ld hl,road_packed
+  331 4187    11 00 00                03               ld de,0
+  332 418A    CD 74 48                05               call LZ48_decrunch
+  333 418D    01 00 7F                03               ld bc,#7f00
+  334 4190    3E 05                   02               ld a,5
+  335 4192    ED 79                   04               out (c),a
+  336 4194    3E 4D                   02               ld a,#4d
+  337 4196    ED 79                   04               out (c),a
+  338 4198    3E 06                   02               ld a,6
+  339 419A    ED 79                   04               out (c),a
+  340 419C    3E 5D                   02               ld a,#5d
+  341 419E    ED 79                   04               out (c),a
+  342                                          ; Die Landschaft braucht zwei identische Rahmenbilder. LDIR kopiert
+  343                                          ; #4000 Bytes nach #0000; die erste Seite #c000 bleibt sichtbar.
+  344                                          ; back_page=0 bezeichnet die zuerst unsichtbare Seite. Erst ein vollstaendiger
+  345                                          ; Durchlauf ueber 64 Spalten gibt sie zur Anzeige frei. Hier darf der
+  346                                          ; 16-KiB-Transfer mehrere Frames dauern, weil der Vorhang geschlossen ist.
+  347 41A0                                     init_not_road:
+  348 41A0    3A BB 48                04               ld a,(scene)
+  349 41A3    FE 03                   02               cp 3
+  350 41A5    20 29                   02               jr nz,init_not_terrain
+  351 41A7    21 00 C0                03               ld hl,#c000
+  352 41AA    11 00 00                03               ld de,0
+  353 41AD    01 00 40                03               ld bc,#4000
+  354 41B0    ED B0                   05               ldir
+  355 41B2    AF                      01               xor a
+  356 41B3    32 C6 48                04               ld (back_page),a
+  357 41B6    32 CC 48                04               ld (terrain_column),a
+  358 41B9    32 CD 48                04               ld (terrain_camera),a
+  359 41BC    21 E6 48                03               ld hl,terrain_palette
+  360 41BF    01 00 7F                03               ld bc,#7f00
+  361 41C2    1E 00                   02               ld e,0
+  362 41C4                                     terrain_palette_init:
+  363 41C4    ED 59                   04               out (c),e
+  364 41C6    7E                      02               ld a,(hl)
+  365 41C7    ED 79                   04               out (c),a
+  366 41C9    23                      02               inc hl
+  367 41CA    1C                      01               inc e
+  368 41CB    7B                      01               ld a,e
+  369 41CC    FE 10                   02               cp 16
+  370 41CE    20 F4                   02               jr nz,terrain_palette_init
+  371                                          ; Auch Mode 2 startet mit identischen Vorder-/Hintergrundseiten.
+  372                                          ; #8e unterscheidet sich von #8c nur in den Modusbits: %10 fuer Mode 2.
+  373                                          ; ROMs bleiben aus; sonst verdeckt das untere ROM den zweiten Bildspeicher
+  374                                          ; bei CPU-Lesezugriffen. Die Videologik liest unabhaengig davon RAM.
+  375 41D0                                     init_not_terrain:
+  376 41D0    3A BB 48                04               ld a,(scene)
+  377 41D3    FE 05                   02               cp 5
+  378 41D5    20 1A                   02               jr nz,init_not_moire
+  379 41D7    21 00 C0                03               ld hl,#c000
+  380 41DA    11 00 00                03               ld de,0
+  381 41DD    01 00 40                03               ld bc,#4000
+  382 41E0    ED B0                   05               ldir                    ; zwei identische Grundbilder
+  383 41E2    AF                      01               xor a
+  384 41E3    32 C6 48                04               ld (back_page),a
+  385 41E6    32 C4 48                04               ld (moire_row),a
+  386 41E9    32 C5 48                04               ld (moire_phase),a
+  387 41EC    01 8E 7F                03               ld bc,#7f8e
+  388 41EF    ED 49                   04               out (c),c               ; Mode 2, ROMs aus
+  389                                          ; Nur im Finale dient der untere RAM als entpackter Scrolltext.
+  390                                          ; JP statt CALL + RET ist ein Endaufruf: Das RET des Entpackers geht
+  391                                          ; direkt zum Aufrufer von init_scene zurueck.
+  392 41F1                                     init_not_moire:
+  393 41F1    3A BB 48                04               ld a,(scene)
+  394 41F4    FE 06                   02               cp 6
+  395 41F6    C0                      02               ret nz
+  396 41F7    21 EF AE                03               ld hl,scroll_packed
+  397 41FA    11 00 00                03               ld de,0
+  398 41FD    C3 74 48                03               jp LZ48_decrunch
+  399                                          
+  400                                          ; Kurzer Vorhang: 13 Frames zum Oeffnen, 13 zum Schliessen.
+  401                                          ; Die letzte Szene bleibt nach der vollstaendigen Laufschrift offen.
+  402                                          ; VORHANG DURCH R6. R6 zaehlt sichtbare Zeichenzeilen, hier je 8 Rasterzeilen.
+  403                                          ; 25 bedeutet 200 sichtbare Zeilen, 0 bedeutet geschlossen. Die Routine
+  404                                          ; veraendert nur die sichtbare Hoehe, nicht die Gesamtzahl der Rasterzeilen.
+  405                                          ; In den ersten 12 gezeichneten Frames waechst R6 als 2*scene_frame;
+  406                                          ; ab Frame 13 gilt 25. Vor dem Szenenende gilt entsprechend 2*Restframes.
+  407                                          ; HL/DE dienen der 16-Bit-Restzeitberechnung, A liefert zuletzt R6.
+  408                                          ; Szene 6 erhaelt nach dem Oeffnen immer R6=25, damit das Schlussbild bleibt.
+  409 4200                                     shutter:
+  410 4200    2A BC 48                05               ld hl,(scene_frame)
+  411 4203    7C                      01               ld a,h
+  412 4204    B7                      01               or a
+  413 4205    20 08                   02               jr nz,shutter_end
+  414 4207    7D                      01               ld a,l
+  415 4208    FE 0D                   02               cp 13
+  416 420A    30 03                   02               jr nc,shutter_end
+  417 420C    87                      01               add a,a
+  418 420D    18 23                   03               jr shutter_write
+  419 420F                                     shutter_end:
+  420 420F    3A BB 48                04               ld a,(scene)
+  421 4212    FE 06                   02               cp 6
+  422 4214    3E 19                   02               ld a,25
+  423 4216    28 1A                   02               jr z,shutter_write
+  424 4218    2A C9 48                05               ld hl,(scene_length)
+  425 421B    ED 5B BC 48             06               ld de,(scene_frame)
+  426 421F    B7                      01               or a
+  427 4220    ED 52                   04               sbc hl,de
+  428 4222    7C                      01               ld a,h
+  429 4223    B7                      01               or a
+  430 4224    3E 19                   02               ld a,25
+  431 4226    20 0A                   02               jr nz,shutter_write
+  432 4228    7D                      01               ld a,l
+  433 4229    FE 0D                   02               cp 13
+  434 422B    38 04                   02               jr c,shutter_double
+  435 422D    3E 19                   02               ld a,25
+  436 422F    18 01                   03               jr shutter_write
+  437 4231                                     shutter_double:
+  438 4231    87                      01               add a,a
+  439 4232                                     shutter_write:
+  440 4232    1E 06                   02               ld e,6
+  441 4234    C3 EE 40                03               jp crtc_write
+  442                                          
+  443                                          ; Die letzten 32 Zeilen bleiben fuer Laufschrift in stabiler Farbe.
+  444                                          ; Eintritt nach VSYNC; Pollphase kann wenige Mikrosekunden schwanken.
+  445                                          ; CHROM UND SPLIT: Nur Pen 1 wechselt seine Farbe, die Pixelbytes bleiben.
+  446                                          ; Die Warteschleife verschiebt den Start vom VSYNC in den sichtbaren Bereich.
+  447                                          ; 640 Durchlaeufe kosten ungefaehr 4,48 ms auf dem CPC.
+  448                                          ; light_table liegt auf einer 256-Byte-Grenze: H bleibt konstant, L ist
+  449                                          ; phase. INC L laeuft nach 255 auf 0, ohne in die naechste Tabelle zu tragen.
+  450                                          ; D zaehlt 168 Farbzeilen; in Szene 4 sind es 144 bis zum Mode-2-Unterteil.
+  451 4237                                     raster_effect:
+  452 4237    11 80 02                03               ld de,640
+  453 423A                                     top_delay:
+  454 423A    1B                      02               dec de
+  455 423B    7A                      01               ld a,d
+  456 423C    B3                      01               or e
+  457 423D    20 FB                   02               jr nz,top_delay
+  458 423F    01 00 7F                03               ld bc,#7f00
+  459 4242    3E 01                   02               ld a,1
+  460 4244    ED 79                   04               out (c),a
+  461 4246    3A BE 48                04               ld a,(phase)
+  462 4249    6F                      01               ld l,a
+  463 424A    26 4E                   02               ld h,light_table/256
+  464 424C    3A BB 48                04               ld a,(scene)
+  465 424F    FE 04                   02               cp 4
+  466 4251    16 A8                   02               ld d,168
+  467 4253    20 02                   02               jr nz,raster_line
+  468 4255    16 90                   02               ld d,144
+  469                                          ; ZEITKRITISCH: Zwischen zwei aufeinanderfolgenden Farb-OUTs liegen
+  470                                          ; bei genommenem JR genau 64 us im CPC-Timing:
+  471                                          ; LD A,(HL) 2 + OUT 4 + INC L 1 + 53*NOP 53 + DEC D 1 + JR NZ 3.
+  472                                          ; DEFS 53,0 legt 53 Opcodebytes #00 ab: Die CPU fuehrt sie als NOP aus.
+  473                                          ; Ein hinzugefuegter Befehl verschiebt alle folgenden Farbwechsel.
+  474                                          ; Der letzte JR faellt durch; danach setzt #4b den Pen auf helles Weiss.
+  475                                          ; Szene 4 schreibt anschliessend #8e: Das Gate Array interpretiert die
+  476                                          ; folgenden Bildschirmbytes als acht 1-Bit-Pixel statt zwei 4-Bit-Pixel.
+  477                                          ; Der Generator hat den unteren Bildbereich bereits passend gepackt.
+  478 4257                                     raster_line:
+  479 4257    7E                      02               ld a,(hl)                 ; 2 us: naechste Lichtfarbe lesen
+  480 4258    ED 79                   04               out (c),a                 ; 4 us: Farbwechsel fuer den bereits gewaehlten Pen 1
+  481 425A    2C                      01               inc l                     ; 1 us: Tabellenindex mit 8-Bit-Umlauf
+  482 428F    00                      53               defs 53,0                 ; 53 us: 53 ausgefuehrte NOPs (#00)
+  483 4290    15                      01               dec d                     ; 1 us: verbleibende Farbzeilen zaehlen
+  484 4291    20 C4                   02               jr nz,raster_line        ; exakt 64 us zwischen den OUTs
+  485 4293    3E 4B                   02               ld a,#4b
+  486 4295    ED 79                   04               out (c),a                 ; 4 us: Farbwechsel fuer den bereits gewaehlten Pen 1
+  487 4297    3A BB 48                04               ld a,(scene)
+  488 429A    FE 04                   02               cp 4
+  489 429C    C0                      02               ret nz
+  490 429D    3E 8E                   02               ld a,#8e
+  491 429F    ED 79                   04               out (c),a               ; mitten im Bild: Mode 0 -> Mode 2
+  492 42A1    C9                      03               ret
+  493                                          
+  494                                          ; Spiegelung: 32 unabhaengig verschobene Zeilen, jeweils 80 Bytes.
+  495                                          ; Entrolltes LDI spart gegenueber wiederholendem LDIR 1 us pro Byte.
+  496                                          ; WASSERSPIEGELUNG. IX zeigt auf 16-Bit-Zeilenoffsets ab Bildschirmzeile 128.
+  497                                          ; IY zeigt auf die naechste 96-Byte-Quellzeile im unteren RAM. Jede besteht
+  498                                          ; aus 8 Randbytes, 80 Bildbytes und nochmals 8 Randbytes zum Verschieben.
+  499                                          ; Der Sinuswert 1..95, viermal rechtsgeschoben, ergibt 0..5; plus 5 also
+  500                                          ; Quellversatz 5..10. Der Ausschnitt bleibt stets innerhalb der 96 Bytes.
+  501                                          ; 32 Zeilen * 80 LDI * 5 us ergeben 12,8 ms reine Kopierzeit pro Frame.
+  502                                          ; Die entrollten LDIs sparen den Wiederholungszuschlag von LDIR.
+  503                                          ; BC wird dabei dekrementiert, dient hier aber nicht als Schleifenzaehler.
+  504 42A2                                     water_effect:
+  505 42A2    DD 21 3C 4C             04               ld ix,row_addresses+128*2
+  506 42A6    FD 21 00 00             04               ld iy,0
+  507 42AA    3A BE 48                04               ld a,(phase)
+  508 42AD    32 C2 48                04               ld (wave_index),a
+  509 42B0    3E 20                   02               ld a,32
+  510 42B2    32 C3 48                04               ld (rows_left),a
+  511                                          ; HL = IY + horizontaler Quellversatz. PUSH IY / POP HL kopiert den
+  512                                          ; Indexregisterwert in HL; danach steht der normale Stack wieder wie zuvor.
+  513                                          ; DE = #c000 OR Zeilenoffset aus (IX). Da der Offset kleiner als #4000 ist,
+  514                                          ; ueberlappen seine Bits nicht mit der Seitenbasis; OR entspricht Addition.
+  515                                          ; 80 LDI lesen fortlaufend von HL und schreiben fortlaufend nach DE.
+  516                                          ; IX += 2 geht zur naechsten Bildschirmzeile, IY += 96 zur naechsten Quelle.
+  517                                          ; wave_index += 3 veraendert die Wellenphase zwischen benachbarten Zeilen.
+  518 42B5                                     water_row:
+  519 42B5    3A C2 48                04               ld a,(wave_index)
+  520 42B8    6F                      01               ld l,a
+  521 42B9    26 4F                   02               ld h,sine_table/256
+  522 42BB    7E                      02               ld a,(hl)
+  523 42BC    CB 3F                   02               srl a                     ; Wellenwert halbieren; vier SRL ergeben Division durch 16
+  524 42BE    CB 3F                   02               srl a                     ; Wellenwert halbieren; vier SRL ergeben Division durch 16
+  525 42C0    CB 3F                   02               srl a                     ; Wellenwert halbieren; vier SRL ergeben Division durch 16
+  526 42C2    CB 3F                   02               srl a                     ; Wellenwert halbieren; vier SRL ergeben Division durch 16
+  527 42C4    C6 05                   02               add 5                     ; Ausschnittbeginn im gepolsterten Quellstreifen
+  528 42C6    5F                      01               ld e,a
+  529 42C7    16 00                   02               ld d,0
+  530 42C9    FD E5                   05               push iy
+  531 42CB    E1                      03               pop hl
+  532 42CC    19                      03               add hl,de
+  533 42CD    DD 5E 00                05               ld e,(ix+0)
+  534 42D0    DD 7E 01                05               ld a,(ix+1)
+  535 42D3    F6 C0                   02               or #c0
+  536 42D5    57                      01               ld d,a
+  537                                                  repeat 80
+  538 42D6    ED A0 ED A0 ED A0 ...   05 x80           ldi
+  539                                                  rend
+  540 4376    11 60 00                03               ld de,96                  ; Schrittweite einer gepolsterten Wasserzeile
+  541 4379    FD 19                   04               add iy,de                 ; Quelle der naechsten Spiegelungszeile
+  542 437B    DD 23                   03               inc ix
+  543 437D    DD 23                   03               inc ix
+  544 437F    3A C2 48                04               ld a,(wave_index)
+  545 4382    C6 03                   02               add 3
+  546 4384    32 C2 48                04               ld (wave_index),a
+  547 4387    3A C3 48                04               ld a,(rows_left)
+  548 438A    3D                      01               dec a
+  549 438B    32 C3 48                04               ld (rows_left),a
+  550 438E    C2 B5 42                03               jp nz,water_row
+  551 4391    C9                      03               ret
+  552                                          
+  553                                          ; Feste Kamera. Nur acht Pixel der Mittellinie pro Zeile werden kopiert.
+  554                                          ; 32 Perspektivphasen, zuerst alle zwei Frames, dann jeder Frame. R13 bleibt null.
+  555                                          ; STRASSENBEWEGUNG. Die Bildschirmadresse bleibt konstant (R13=0).
+  556                                          ; Solange das Highbyte von scene_frame null ist, teilt SRL A die Zeit durch 2.
+  557                                          ; Ab Frame 256 gibt jeder Videoframe die naechste der 32 Phasen frei.
+  558                                          ; AND 31 bildet den zyklischen Phasenindex; die Tabelle liegt ab Adresse 0.
+  559                                          ; Der Z80 besitzt keine Multiplikation. Sechs ADD HL,HL bilden phase*64;
+  560                                          ; DE merkt sich diesen Wert, zwei weitere Verdopplungen ergeben phase*256.
+  561                                          ; ADD HL,DE liefert phase*320, den Beginn von 80 Zeilen zu je vier Bytes.
+  562 4392                                     road_effect:
+  563 4392    3A BD 48                04               ld a,(scene_frame+1)      ; Highbyte: ab Frame 256 ungleich null
+  564 4395    B7                      01               or a                      ; Zero-Flag merkt sich die langsame/schnelle Phase
+  565 4396    3A BC 48                04               ld a,(scene_frame)        ; Lowbyte laden, ohne das Zero-Flag zu veraendern
+  566 4399    20 02                   02               jr nz,road_fast           ; ab Frame 256 die Halbierung ueberspringen
+  567 439B    CB 3F                   02               srl a                   ; die ersten fuenf Sekunden langsamer
+  568 439D                                     road_fast:
+  569 439D    E6 1F                   02               and 31
+  570 439F    32 CB 48                04               ld (road_phase),a
+  571 43A2    6F                      01               ld l,a
+  572 43A3    26 00                   02               ld h,0
+  573 43A5    29                      03               add hl,hl
+  574 43A6    29                      03               add hl,hl
+  575 43A7    29                      03               add hl,hl
+  576 43A8    29                      03               add hl,hl
+  577 43A9    29                      03               add hl,hl
+  578 43AA    29                      03               add hl,hl               ; phase*64
+  579 43AB    54                      01               ld d,h
+  580 43AC    5D                      01               ld e,l
+  581 43AD    29                      03               add hl,hl
+  582 43AE    29                      03               add hl,hl
+  583 43AF    19                      03               add hl,de               ; phase*320
+  584 43B0    DD 21 2C 4C             04               ld ix,row_addresses+120*2
+  585 43B4    3E 50                   02               ld a,80
+  586 43B6    32 C3 48                04               ld (rows_left),a
+  587                                          ; IX liest die Zielzeile 120..199 aus row_addresses. Der Zusatz 38
+  588                                          ; waehlt die Byte-Spalten 38..41, also Mode-0-Pixel 76..83 in der Bildmitte.
+  589                                          ; PUSH/POP bewahrt HL als Quellzeiger waehrend der Zieladressrechnung.
+  590                                          ; Vier LDI schreiben genau diese acht Pixel. 80 Zeilen brauchen 320 Bytes;
+  591                                          ; die uebrige Grafik bleibt unangetastet. Danach folgen passende Randfarben.
+  592 43B9                                     road_row:
+  593 43B9    DD 5E 00                05               ld e,(ix+0)
+  594 43BC    DD 7E 01                05               ld a,(ix+1)
+  595 43BF    F6 C0                   02               or #c0
+  596 43C1    57                      01               ld d,a
+  597 43C2    E5                      04               push hl
+  598 43C3    21 26 00                03               ld hl,38
+  599 43C6    19                      03               add hl,de
+  600 43C7    EB                      01               ex de,hl
+  601 43C8    E1                      03               pop hl
+  602                                                  repeat 4
+  603 43C9    ED A0 ED A0 ED A0 ...   05 x4            ldi
+  604                                                  rend
+  605 43D1    DD 23                   03               inc ix
+  606 43D3    DD 23                   03               inc ix
+  607 43D5    3A C3 48                04               ld a,(rows_left)
+  608 43D8    3D                      01               dec a
+  609 43D9    32 C3 48                04               ld (rows_left),a
+  610 43DC    20 DB                   02               jr nz,road_row
+  611                                                  ; Passende Bewegungsphase fuer die acht Bordsteinfarben.
+  612 43DE    3A CB 48                04               ld a,(road_phase)
+  613 43E1    CB 3F                   02               srl a
+  614 43E3    CB 3F                   02               srl a
+  615 43E5    6F                      01               ld l,a
+  616 43E6    26 00                   02               ld h,0
+  617 43E8    11 F6 48                03               ld de,road_colors
+  618 43EB    19                      03               add hl,de
+  619 43EC    01 00 7F                03               ld bc,#7f00
+  620 43EF    1E 07                   02               ld e,7
+  621 43F1    16 08                   02               ld d,8
+  622                                          ; E=7..14 sind acht vorbereitete Farbklassen an den Bordsteinen.
+  623                                          ; HL liest acht Werte aus road_colors, beginnend bei floor(road_phase/4).
+  624                                          ; Die Tabelle enthaelt zwei gleiche Achtergruppen, damit dieser Ausschnitt
+  625                                          ; ohne Sonderfall ueber das Ende der ersten Gruppe laufen darf.
+  626                                          ; Farbrotation bewegt so die Bordsteine ohne Kopieren ihrer Pixel.
+  627 43F3                                     road_palette:
+  628 43F3    ED 59                   04               out (c),e
+  629 43F5    7E                      02               ld a,(hl)
+  630 43F6    ED 79                   04               out (c),a
+  631 43F8    23                      02               inc hl
+  632 43F9    1C                      01               inc e
+  633 43FA    15                      01               dec d
+  634 43FB    20 F6                   02               jr nz,road_palette
+  635 43FD    C9                      03               ret
+  636                                          
+  637                                          ; Mode 2: 640x200, zwei Farben. 32 neue Zeilen je Videoframe,
+  638                                          ; 128 Zeilen je Musterbild. CRTC-Seitenwechsel erst nach fertigem Bild.
+  639                                          ; Tabelle enthaelt acht Pixelphasen einer nichtlinearen Linienstruktur.
+  640                                          ; MODE-2-INTERFERENZ. Veraendert AF, BC, DE und HL sowie die Arbeitsbytes.
+  641                                          ; 32 Zeilen je Aufruf, 128 Zeilen je fertigem Muster: Umschaltung alle 4 Frames.
+  642                                          ; moire_row ist die Zeile 0..127 innerhalb des Fensters, Bildschirm-y ist +36.
+  643                                          ; back_page ist das Highbyte der unsichtbaren Seite (#00 oder #c0).
+  644                                          ; Die Schriftbereiche ausserhalb des Fensters bleiben in beiden Seiten gleich.
+  645 43FE                                     moire_effect:
+  646 43FE    3E 20                   02               ld a,32
+  647 4400    32 C3 48                04               ld (rows_left),a
+  648                                          ; Zieladresse zuerst bestimmen, dann auf dem Stack sichern.
+  649                                          ; Der Index 2*(moire_row+36) kann 255 ueberschreiten. ADD A,A liefert das
+  650                                          ; neunte Bit in Carry. LD L,A und LD H,0 erhalten Carry; INC H setzt es
+  651                                          ; bei Bedarf als Highbyte des Tabellenoffsets um.
+  652 4403                                     moire_row_loop:
+  653 4403    3A C4 48                04               ld a,(moire_row)
+  654 4406    C6 24                   02               add 36                    ; Fenster beginnt in Bildschirmzeile 36
+  655 4408    87                      01               add a,a                   ; Wortindex; Carry traegt das neunte Adressbit
+  656 4409    6F                      01               ld l,a
+  657 440A    26 00                   02               ld h,0                    ; LD veraendert Carry nicht
+  658 440C    30 01                   02               jr nc,moire_addr          ; ohne Ueberlauf passt der Index ins Lowbyte
+  659 440E    24                      01               inc h                     ; sonst Highbyte des Tabellenoffsets auf 1 setzen
+  660                                          ; row_addresses liefert den Offset; OR back_page ergaenzt dessen Seite.
+  661                                          ; Der Sinusindex lautet (2*moire_row + moire_phase) modulo 256.
+  662                                          ; Die Amplitude waechst zeitlich: Frames 0..127 Viertelwert, 128..255
+  663                                          ; Halbwert, danach voller Wert. Das macht die Verformung allmaehlich staerker.
+  664 440F                                     moire_addr:
+  665 440F    11 3C 4B                03               ld de,row_addresses
+  666 4412    19                      03               add hl,de
+  667 4413    5E                      02               ld e,(hl)
+  668 4414    23                      02               inc hl
+  669 4415    3A C6 48                04               ld a,(back_page)
+  670 4418    B6                      02               or (hl)
+  671 4419    57                      01               ld d,a
+  672 441A    D5                      04               push de
+  673 441B    3A C4 48                04               ld a,(moire_row)
+  674 441E    87                      01               add a,a
+  675 441F    47                      01               ld b,a
+  676 4420    3A C5 48                04               ld a,(moire_phase)
+  677 4423    80                      01               add a,b
+  678 4424    6F                      01               ld l,a
+  679 4425    26 4F                   02               ld h,sine_table/256
+  680 4427    7E                      02               ld a,(hl)
+  681 4428    47                      01               ld b,a
+  682 4429    3A BD 48                04               ld a,(scene_frame+1)
+  683 442C    B7                      01               or a
+  684 442D    78                      01               ld a,b
+  685 442E    20 0D                   02               jr nz,moire_amplitude
+  686 4430    CB 3F                   02               srl a
+  687 4432    47                      01               ld b,a
+  688 4433    3A BC 48                04               ld a,(scene_frame)
+  689 4436    CB 7F                   02               bit 7,a
+  690 4438    78                      01               ld a,b
+  691 4439    20 02                   02               jr nz,moire_amplitude
+  692 443B    CB 3F                   02               srl a
+  693                                          ; Der Wert B steuert Feinauswahl und Byteversatz. Seine unteren drei Bits
+  694                                          ; waehlen eine von acht Pixelphasen. Jede Variante belegt 512 Bytes:
+  695                                          ; 256 Musterbytes und eine identische zweite Haelfte fuer randlose Ausschnitte.
+  696                                          ; (Phase AND 7)*2 addiert die passende Zahl von 256-Byte-Seiten zu H.
+  697                                          ; L=(moire_row+B) modulo 256 waehlt den Anfang innerhalb der Variante.
+  698                                          ; Ein 80-Byte-LDI-Ausschnitt passt dank der doppelten Ablage auch ab Offset 255.
+  699                                          ; Erst nach Zeile 127 schreibt R12 die fertige Seite. RRCA zweimal bildet
+  700                                          ; #c0 -> #30 bzw. #00 -> #00. XOR #c0 wechselt danach die Arbeitsseite.
+  701 443D                                     moire_amplitude:
+  702 443D    47                      01               ld b,a
+  703 443E    E6 07                   02               and 7
+  704 4440    87                      01               add a,a
+  705 4441    C6 50                   02               add a,moire_patterns/256
+  706 4443    67                      01               ld h,a
+  707 4444    3A C4 48                04               ld a,(moire_row)
+  708 4447    80                      01               add a,b
+  709 4448    6F                      01               ld l,a
+  710 4449    D1                      03               pop de
+  711                                                  repeat 80
+  712 444A    ED A0 ED A0 ED A0 ...   05 x80           ldi
+  713                                                  rend
+  714 44EA    3A C4 48                04               ld a,(moire_row)
+  715 44ED    3C                      01               inc a
+  716 44EE    32 C4 48                04               ld (moire_row),a
+  717 44F1    3A C3 48                04               ld a,(rows_left)
+  718 44F4    3D                      01               dec a
+  719 44F5    32 C3 48                04               ld (rows_left),a
+  720 44F8    C2 03 44                03               jp nz,moire_row_loop
+  721 44FB    3A C4 48                04               ld a,(moire_row)
+  722 44FE    FE 80                   02               cp 128
+  723 4500    C0                      02               ret nz
+  724 4501    AF                      01               xor a
+  725 4502    32 C4 48                04               ld (moire_row),a
+  726 4505    3A C6 48                04               ld a,(back_page)
+  727 4508    0F                      01               rrca
+  728 4509    0F                      01               rrca
+  729 450A    1E 0C                   02               ld e,12
+  730 450C    CD EE 40                05               call crtc_write
+  731 450F    3A C6 48                04               ld a,(back_page)
+  732 4512    EE C0                   02               xor #c0
+  733 4514    32 C6 48                04               ld (back_page),a
+  734 4517    3A C5 48                04               ld a,(moire_phase)
+  735 451A    C6 03                   02               add 3
+  736 451C    32 C5 48                04               ld (moire_phase),a
+  737 451F    C9                      03               ret
+  738                                          
+  739                                          ; Eine breite Pixelschrift bewegt sich um zwei Mode-0-Pixel pro Bild.
+  740                                          ; Ihr entpackter Spaltenstrom liegt nur im Finale bei &0000.
+  741                                          ; LAUFSCHRIFT IM FINALE. scroll_pos ist ein Byteoffset in der Quelle.
+  742                                          ; Der Strom speichert pro horizontaler Schriftspalte sieben Bytes,
+  743                                          ; eines fuer jede der sieben Pixelzeilen. Ein Byte enthaelt zwei gleiche
+  744                                          ; Mode-0-Pixel. Pro Frame wandert die Schrift deshalb zwei Pixel nach links.
+  745                                          ; Bei scroll_pos >= scroll_size endet die Routine sofort. Der Generator
+  746                                          ; haengt Leerzeichen an; am Ende ist der gesamte Scrollstreifen leer.
+  747 4520                                     scroll_tick:
+  748 4520    2A C7 48                05               ld hl,(scroll_pos)
+  749 4523    11 18 0F                03               ld de,scroll_size
+  750 4526    B7                      01               or a
+  751 4527    ED 52                   04               sbc hl,de
+  752 4529    D0                      02               ret nc
+  753 452A    DD 21 9C 4C             04               ld ix,row_addresses+176*2
+  754 452E    FD 2A C7 48             06               ld iy,(scroll_pos)
+  755 4532    3E 07                   02               ld a,7
+  756 4534    32 C3 48                04               ld (rows_left),a
+  757                                          ; DE zeigt auf Byte 0 der Zielzeile, HL auf Byte 1 derselben Zeile.
+  758                                          ; 79 LDI schieben die Zeile um ein Byte nach links. Die Kopierrichtung ist
+  759                                          ; sicher: Die Quelle liegt immer ein Byte vor dem Ziel, kein spaeter noch
+  760                                          ; benoetigtes Quellbyte wird ueberschrieben. DE endet auf dem rechten Rand.
+  761                                          ; Dorthin kommt (IY), das naechste Byte dieser Schriftspalte. IY waechst
+  762                                          ; pro Pixelzeile um eins; scroll_pos waechst erst nach sieben Zeilen um 7.
+  763 4537                                     scroll_row:
+  764 4537    DD 5E 00                05               ld e,(ix+0)
+  765 453A    DD 7E 01                05               ld a,(ix+1)
+  766 453D    F6 C0                   02               or #c0
+  767 453F    57                      01               ld d,a
+  768 4540    62                      01               ld h,d
+  769 4541    6B                      01               ld l,e
+  770 4542    23                      02               inc hl
+  771                                                  repeat 79
+  772 4543    ED A0 ED A0 ED A0 ...   05 x79           ldi
+  773                                                  rend
+  774 45E1    FD 7E 00                05               ld a,(iy+0)
+  775 45E4    12                      02               ld (de),a
+  776 45E5    FD 23                   03               inc iy
+  777 45E7    DD 23                   03               inc ix
+  778 45E9    DD 23                   03               inc ix
+  779 45EB    3A C3 48                04               ld a,(rows_left)
+  780 45EE    3D                      01               dec a
+  781 45EF    32 C3 48                04               ld (rows_left),a
+  782 45F2    C2 37 45                03               jp nz,scroll_row
+  783 45F5    2A C7 48                05               ld hl,(scroll_pos)
+  784 45F8    11 07 00                03               ld de,7
+  785 45FB    19                      03               add hl,de
+  786 45FC    22 C7 48                05               ld (scroll_pos),hl
+  787 45FF    C9                      03               ret
+  788                                          
+  789                                          ; AY-Register A mit E beschreiben. Port-C-Unterbits bleiben null.
+  790                                          ; AY-HELFER. Eingabe A=AY-Registernummer, E=Datenwert.
+  791                                          ; Veraendert BC; erhaelt AF, DE, HL, IX und IY. Die Folge besteht nur aus
+  792                                          ; LD, OUT und RET, daher bleiben auch die Flags erhalten.
+  793                                          ; PPI A liefert den AY-Datenbus. PPI C Bit 7 ist BDIR, Bit 6 ist BC1:
+  794                                          ; #c0 = 11 adressiert ein Register, #80 = 10 schreibt dessen Daten,
+  795                                          ; #00 = 00 beendet die jeweilige Busphase. Der AY erzeugt danach selbst
+  796                                          ; Ton; die CPU muss keine einzelnen Schwingungen nachbilden.
+  797                                          ; Port-C-Unterbits bleiben null: Tastaturzeile 0, Kassettenmotor und
+  798                                          ; Kassetten-Ausgang aus. Dieser Player bedient keine Tastaturabfrage.
+  799 4600                                     ay_write:
+  800 4600    01 00 F4                03               ld bc,#f400               ; PPI-Port A als AY-Datenbus
+  801 4603    ED 79                   04               out (c),a                 ; AY-Registernummer auf den Datenbus legen
+  802 4605    01 C0 F6                03               ld bc,#f6c0               ; Port C, BDIR=1 und BC1=1
+  803 4608    ED 49                   04               out (c),c                 ; aktuellen Steuerwert C ausgeben (Phase oder Ruhe)
+  804 460A    0E 00                   02               ld c,0                    ; Steuerwert null; der Port bleibt #f6xx
+  805 460C    ED 49                   04               out (c),c                 ; aktuellen Steuerwert C ausgeben (Phase oder Ruhe)
+  806 460E    06 F4                   02               ld b,#f4                  ; zurueck zu Port A, C bleibt 0
+  807 4610    ED 59                   04               out (c),e                 ; Registerwert auf den AY-Datenbus legen
+  808 4612    01 80 F6                03               ld bc,#f680               ; Port C, BDIR=1 und BC1=0 fuer Schreibphase
+  809 4615    ED 49                   04               out (c),c                 ; aktuellen Steuerwert C ausgeben (Phase oder Ruhe)
+  810 4617    0E 00                   02               ld c,0                    ; Steuerwert null; der Port bleibt #f6xx
+  811 4619    ED 49                   04               out (c),c                 ; aktuellen Steuerwert C ausgeben (Phase oder Ruhe)
+  812 461B    C9                      03               ret
+  813                                          
+  814                                          ; Lautstaerke sinkt im Finale waehrend der letzten 32 Bilder.
+  815                                          ; AUSBLENDEN. Nur im Finale und nur bei weniger als 32 Restframes.
+  816                                          ; volume_limit = floor(Restframes/2), also absteigend bis 0.
+  817                                          ; Der Aufruf folgt music_tick; die neue Grenze wirkt deshalb beim
+  818                                          ; naechsten Musikaufruf. show_complete setzt die Kanaele abschliessend stumm.
+  819 461C                                     ending_volume:
+  820 461C    3A BB 48                04               ld a,(scene)
+  821 461F    FE 06                   02               cp 6
+  822 4621    C0                      02               ret nz
+  823 4622    2A C9 48                05               ld hl,(scene_length)
+  824 4625    ED 5B BC 48             06               ld de,(scene_frame)
+  825 4629    B7                      01               or a                      ; Carry fuer die folgende 16-Bit-Subtraktion loeschen
+  826 462A    ED 52                   04               sbc hl,de                 ; Restframes = Szenenlaenge - bisherige Frames
+  827 462C    7C                      01               ld a,h
+  828 462D    B7                      01               or a                      ; Highbyte der Restzeit auf null pruefen
+  829 462E    C0                      02               ret nz
+  830 462F    7D                      01               ld a,l
+  831 4630    FE 20                   02               cp 32
+  832 4632    D0                      02               ret nc
+  833 4633    CB 3F                   02               srl a                     ; zwei Frames je Lautstaerkestufe
+  834 4635    32 BA 48                04               ld (volume_limit),a
+  835 4638    C9                      03               ret
+  836                                          ; LAUTSTAERKE MIT GRENZE. Eingabe A=8/9/10, E=gewuenschter Pegel 0..15.
+  837                                          ; Bei R10 (Kanal C) teilen See und Split den Pegel zusaetzlich durch 4.
+  838                                          ; AF wird vor dem Vergleich gesichert, weil A die AY-Registernummer traegt.
+  839                                          ; CP E prueft volume_limit gegen E. Falls E groesser ist, ersetzt die
+  840                                          ; Routine E durch die Grenze. Endaufruf von ay_write ueber JP.
+  841 4639                                     volume_write:
+  842 4639    FE 0A                   02               cp 10
+  843 463B    20 11                   02               jr nz,volume_common
+  844 463D    3A BB 48                04               ld a,(scene)
+  845 4640    FE 01                   02               cp 1
+  846 4642    28 04                   02               jr z,drums_quiet
+  847 4644    FE 04                   02               cp 4
+  848 4646    20 04                   02               jr nz,drums_full
+  849 4648                                     drums_quiet:
+  850 4648    CB 3B                   02               srl e
+  851 464A    CB 3B                   02               srl e
+  852 464C                                     drums_full:
+  853 464C    3E 0A                   02               ld a,10
+  854 464E                                     volume_common:
+  855 464E    F5                      04               push af                   ; AY-Registernummer und Flags ueber Vergleich retten
+  856 464F    3A BA 48                04               ld a,(volume_limit)
+  857 4652    BB                      01               cp e                      ; Grenze mit angefordertem Pegel vergleichen
+  858 4653    30 01                   02               jr nc,volume_keep         ; Grenze >= Pegel: E kann unveraendert bleiben
+  859 4655    5F                      01               ld e,a                    ; sonst auf die globale Grenze begrenzen
+  860 4656                                     volume_keep:
+  861 4656    F1                      03               pop af                    ; AY-Registernummer wiederherstellen
+  862 4657    C3 00 46                03               jp ay_write               ; Endaufruf: RET des Helfers geht direkt zum Aufrufer
+  863                                          
+  864                                          ; Eigene Komposition: 128 Sechzehntel, acht Frames pro Schritt.
+  865                                          ; A Arpeggio, B pulsierender Bass, C Kick/Snare/Hi-Hat.
+  866                                          ; MUSIK OHNE FIRMWARE. beat_frame zaehlt 0..7 innerhalb einer Note;
+  867                                          ; song_step zaehlt die 128 Notenschritte. Ein Schritt dauert etwa 159,7 ms.
+  868                                          ; Die Tabellen enthalten 16-Bit-Perioden, keine Frequenzen. Beim AY mit
+  869                                          ; 1-MHz-Takt gilt fuer die Tonkanaele f = 1000000 / (16 * Periode).
+  870                                          ; R0/R1 setzen Periode A, R2/R3 Periode B. Nur bei beat_frame=0 kommen
+  871                                          ; neue Tonhoehen; die Lautstaerkekurven erhalten trotzdem jeden Frame Updates.
+  872                                          ; E transportiert jeweils das Low- oder Highbyte an ay_write. Dieser
+  873                                          ; Helfer erhaelt HL, daher kann der Notenzeiger zwischen den Writes bleiben.
+  874 465A                                     music_tick:
+  875 465A    3A C0 48                04               ld a,(beat_frame)
+  876 465D    B7                      01               or a
+  877 465E    20 2A                   02               jr nz,music_envelope
+  878 4660    3A C1 48                04               ld a,(song_step)
+  879 4663    87                      01               add a,a                   ; zwei Periodenbytes pro Notenschritt
+  880 4664    5F                      01               ld e,a
+  881 4665    16 00                   02               ld d,0
+  882 4667    21 3C 49                03               ld hl,lead_notes
+  883 466A    19                      03               add hl,de
+  884 466B    D5                      04               push de                   ; Tabellenoffset fuer die anschliessende Bassnote sichern
+  885 466C    5E                      02               ld e,(hl)
+  886 466D    AF                      01               xor a                     ; AY R0: Lowbyte Tonperiode A
+  887 466E    CD 00 46                05               call ay_write
+  888 4671    23                      02               inc hl
+  889 4672    5E                      02               ld e,(hl)
+  890 4673    3E 01                   02               ld a,1                    ; AY R1: Highbyte Tonperiode A
+  891 4675    CD 00 46                05               call ay_write
+  892 4678    D1                      03               pop de
+  893 4679    21 3C 4A                03               ld hl,bass_notes
+  894 467C    19                      03               add hl,de
+  895 467D    5E                      02               ld e,(hl)
+  896 467E    3E 02                   02               ld a,2                    ; AY R2: Lowbyte Tonperiode B
+  897 4680    CD 00 46                05               call ay_write
+  898 4683    23                      02               inc hl
+  899 4684    5E                      02               ld e,(hl)
+  900 4685    3E 03                   02               ld a,3                    ; AY R3: Highbyte Tonperiode B
+  901 4687    CD 00 46                05               call ay_write
+  902                                          ; Software-Huellkurven: A faellt von 14 auf 7; B von 12 auf 9.
+  903                                          ; Bit 4 der AY-Pegelregister bleibt null, also feste Pegel statt der
+  904                                          ; Hardware-Huellkurve. Die Instrumentform entsteht durch diese Frame-Updates.
+  905                                          ; song_step modulo 4 verteilt Kick, Hi-Hat, Snare, Hi-Hat auf Kanal C.
+  906 468A                                     music_envelope:
+  907 468A    3A C0 48                04               ld a,(beat_frame)
+  908 468D    5F                      01               ld e,a
+  909 468E    3E 0E                   02               ld a,14
+  910 4690    93                      01               sub e
+  911 4691    5F                      01               ld e,a
+  912 4692    3E 08                   02               ld a,8
+  913 4694    CD 39 46                05               call volume_write
+  914 4697    3A C0 48                04               ld a,(beat_frame)
+  915 469A    CB 3F                   02               srl a
+  916 469C    5F                      01               ld e,a
+  917 469D    3E 0C                   02               ld a,12
+  918 469F    93                      01               sub e
+  919 46A0    5F                      01               ld e,a
+  920 46A1    3E 09                   02               ld a,9
+  921 46A3    CD 39 46                05               call volume_write
+  922 46A6    3A C1 48                04               ld a,(song_step)
+  923 46A9    E6 03                   02               and 3
+  924 46AB    28 18                   02               jr z,kick
+  925 46AD    FE 02                   02               cp 2
+  926 46AF    28 04                   02               jr z,snare
+  927 46B1    1E 02                   02               ld e,2
+  928 46B3    18 02                   03               jr noise_drum
+  929 46B5                                     snare:
+  930 46B5    1E 0E                   02               ld e,14
+  931                                          ; R6 ist die Rauschperiode: 2 fuer kurze Hi-Hat, 14 fuer Snare.
+  932                                          ; R7=#1c: Ton A/B an, Ton C aus; Rauschen A/B aus, Rauschen C an.
+  933                                          ; In den sechs unteren Mixerbits bedeutet 1 jeweils DEAKTIVIERT.
+  934                                          ; Die hier null gesetzten Port-Richtungsbits sind keine Lautstaerkebits.
+  935 46B7                                     noise_drum:
+  936 46B7    3E 06                   02               ld a,6
+  937 46B9    CD 00 46                05               call ay_write
+  938 46BC    3E 07                   02               ld a,7
+  939 46BE    1E 1C                   02               ld e,#1c
+  940 46C0    CD 00 46                05               call ay_write
+  941 46C3    18 19                   03               jr drum_volume
+  942                                          ; R7=#38: drei Tonkanaele an, alle Rauschpfade aus.
+  943                                          ; Kanal C erhaelt Lowbyte 0, Highbyte beat_frame+3. Die Periode waechst
+  944                                          ; von #0300 bis #0a00, die Frequenz sinkt: kurzer abfallender Bassdrum-Ton.
+  945 46C5                                     kick:
+  946 46C5    3E 07                   02               ld a,7
+  947 46C7    1E 38                   02               ld e,#38
+  948 46C9    CD 00 46                05               call ay_write
+  949 46CC    3A C0 48                04               ld a,(beat_frame)
+  950 46CF    C6 03                   02               add 3
+  951 46D1    5F                      01               ld e,a
+  952 46D2    3E 05                   02               ld a,5
+  953 46D4    CD 00 46                05               call ay_write
+  954 46D7    3E 04                   02               ld a,4
+  955 46D9    1E 00                   02               ld e,0
+  956 46DB    CD 00 46                05               call ay_write
+  957                                          ; Schlagzeugpegel 14 - 2*beat_frame: 14,12,...,0.
+  958                                          ; AND 7 setzt beat_frame nach acht Aufrufen auf null. Nur dann laeuft
+  959                                          ; song_step weiter; AND 127 laesst die 128-Schritt-Komposition wiederholen.
+  960 46DE                                      drum_volume:
+  961 46DE    3A C0 48                04               ld a,(beat_frame)
+  962 46E1    87                      01               add a,a
+  963 46E2    5F                      01               ld e,a
+  964 46E3    3E 0E                   02               ld a,14
+  965 46E5    93                      01               sub e
+  966 46E6    5F                      01               ld e,a
+  967 46E7    3E 0A                   02               ld a,10
+  968 46E9    CD 39 46                05               call volume_write
+  969 46EC    3A C0 48                04               ld a,(beat_frame)
+  970 46EF    3C                      01               inc a
+  971 46F0    E6 07                   02               and 7
+  972 46F2    32 C0 48                04               ld (beat_frame),a
+  973 46F5    C0                      02               ret nz
+  974 46F6    3A C1 48                04               ld a,(song_step)
+  975 46F9    3C                      01               inc a
+  976 46FA    E6 7F                   02               and 127
+  977 46FC    32 C1 48                04               ld (song_step),a
+  978 46FF    C9                      03               ret
+  979                                          
+  980                                          ; BODENLICHT DURCH PALETTE. Dreimal RRCA und AND 15 ergeben
+  981                                          ; (phase >> 3) AND 15. Aus der wiederholten Farbliste wandert dadurch ein
+  982                                          ; Fenster von sechs Eintraegen, ein Schritt pro acht Videoframes.
+  983                                          ; Die Bildbytes bleiben gleich. Pens 7..12 wechseln ihre Hardwarefarbe.
+  984 4700                                     floor_tick:
+  985 4700    3A BE 48                04               ld a,(phase)
+  986 4703    0F                      01               rrca
+  987 4704    0F                      01               rrca
+  988 4705    0F                      01               rrca
+  989 4706    E6 0F                   02               and 15                    ; 16 Startpositionen in der wiederholten Farbliste
+  990 4708    6F                      01               ld l,a
+  991 4709    26 00                   02               ld h,0
+  992 470B    11 24 49                03               ld de,floor_colors
+  993 470E    19                      03               add hl,de
+  994 470F    01 00 7F                03               ld bc,#7f00
+  995 4712    1E 07                   02               ld e,7                    ; erster zu aendernder Pen
+  996 4714    16 06                   02               ld d,6                    ; sechs Pens fuer die Bodenlinien
+  997                                          ; Gemeinsame Palettenschleife, auch fuer die Initialisierung des Sees.
+  998                                          ; E = erster Pen, D = Anzahl, HL = Farbcodes, BC = #7f00.
+  999                                          ; Veraendert A, DE, HL und Flags; BC bleibt fuer beide OUTs gleich.
+ 1000 4716                                     floor_next:
+ 1001 4716    ED 59                   04               out (c),e
+ 1002 4718    7E                      02               ld a,(hl)
+ 1003 4719    ED 79                   04               out (c),a
+ 1004 471B    23                      02               inc hl
+ 1005 471C    1C                      01               inc e
+ 1006 471D    15                      01               dec d
+ 1007 471E    20 F6                   02               jr nz,floor_next
+ 1008 4720    C9                      03               ret
+ 1009                                          
+ 1010                                          ; Hoehenfeld mit 64x64 Hoehen, 16 Tiefenstufen und 64 Bildspalten.
+ 1011                                          ; Jeder Block umfasst zwei Mode-0-Pixel und vier Rasterzeilen.
+ 1012                                          ; 64x32 logische Bloecke fuellen ein Fenster von 128x128 Mode-0-Pixeln.
+ 1013                                          ; 8 Spalten pro Videoframe: 8 Frames pro fertigem Landschaftsbild.
+ 1014                                          terrain_state equ #b800         ; 16 Paare aus Karten-/Projektionsadresse
+ 1015                                          ; LANDSCHAFT: acht Spalten je Videoframe in den unsichtbaren Bildspeicher.
+ 1016                                          ; Bei Spalte 0 bereitet terrain_prepare die Adressliste fuer diesen
+ 1017                                          ; Kamerastand vor. Diese Liste gilt fuer alle 64 Spalten desselben Bildes.
+ 1018                                          ; Nach Spalte 63 setzt R12 die Startadresse der fertigen Seite; die andere
+ 1019                                          ; Seite wird Arbeitsseite. Dann rueckt die Kamera eine Kartenzeile vor.
+ 1020                                          ; 64 Kamerastaende * 8 Frames ergeben die komplette 512-Frame-Szene.
+ 1021 4721                                     terrain_effect:
+ 1022 4721    3A CC 48                04               ld a,(terrain_column)
+ 1023 4724    B7                      01               or a
+ 1024 4725    CC 66 47                03               call z,terrain_prepare
+ 1025 4728    3E 08                   02               ld a,8
+ 1026 472A    32 D0 48                04               ld (terrain_batch),a
+ 1027 472D                                     terrain_batch_loop:
+ 1028 472D    CD B2 47                05               call terrain_draw_column
+ 1029 4730    3A CC 48                04               ld a,(terrain_column)
+ 1030 4733    3C                      01               inc a
+ 1031 4734    32 CC 48                04               ld (terrain_column),a
+ 1032 4737    3A D0 48                04               ld a,(terrain_batch)
+ 1033 473A    3D                      01               dec a
+ 1034 473B    32 D0 48                04               ld (terrain_batch),a
+ 1035 473E    20 ED                   02               jr nz,terrain_batch_loop
+ 1036 4740    3A CC 48                04               ld a,(terrain_column)
+ 1037 4743    FE 40                   02               cp 64
+ 1038 4745    C0                      02               ret nz
+ 1039 4746    AF                      01               xor a
+ 1040 4747    32 CC 48                04               ld (terrain_column),a
+ 1041 474A    3A C6 48                04               ld a,(back_page)
+ 1042 474D    0F                      01               rrca
+ 1043 474E    0F                      01               rrca
+ 1044 474F    1E 0C                   02               ld e,12
+ 1045 4751    CD EE 40                05               call crtc_write
+ 1046 4754    3A C6 48                04               ld a,(back_page)
+ 1047 4757    EE C0                   02               xor #c0
+ 1048 4759    32 C6 48                04               ld (back_page),a
+ 1049 475C    3A CD 48                04               ld a,(terrain_camera)
+ 1050 475F    3C                      01               inc a
+ 1051 4760    E6 3F                   02               and 63
+ 1052 4762    32 CD 48                04               ld (terrain_camera),a
+ 1053 4765    C9                      03               ret
+ 1054                                          
+ 1055                                          ; Nur einmal je Landschaftsbild. Adressstrom fuer POP DE vorbereiten.
+ 1056                                          ; ADRESSLISTE ERZEUGEN. terrain_camera ist die Welt-Zeile 0..63.
+ 1057                                          ; terrain_track[camera] liefert die seitliche Kameraposition terrain_x.
+ 1058                                          ; HL schreibt ab #b800, IY liest die 16 Tiefenabstaende, BC zeigt auf die
+ 1059                                          ; aktuelle Projektionszeile. Jeder Listeneintrag ist vier Bytes lang:
+ 1060                                          ; [Low(Kartenzeile), High(Kartenzeile), Low(Projektionszeile), High(...)]
+ 1061                                          ; POP DE wird spaeter genau diese Little-Endian-Woerter lesen.
+ 1062                                          ; Diese Vorbereitung benutzt noch den normalen Stack und darf CALL/RET nutzen.
+ 1063 4766                                     terrain_prepare:
+ 1064 4766    3A CD 48                04               ld a,(terrain_camera)
+ 1065 4769    5F                      01               ld e,a
+ 1066 476A    16 00                   02               ld d,0
+ 1067 476C    21 10 7C                03               ld hl,terrain_track
+ 1068 476F    19                      03               add hl,de
+ 1069 4770    7E                      02               ld a,(hl)
+ 1070 4771    32 CF 48                04               ld (terrain_x),a
+ 1071 4774    21 00 B8                03               ld hl,terrain_state
+ 1072 4777    FD 21 00 7C             04               ld iy,terrain_depths
+ 1073 477B    01 00 70                03               ld bc,terrain_projection
+ 1074 477E    3E 10                   02               ld a,16
+ 1075 4780    32 D1 48                04               ld (terrain_count),a
+ 1076                                          ; Weltzeile z = (camera + Tiefenabstand) AND 63.
+ 1077                                          ; Die Kartenadresse ist terrain_map + z*64. Fuer das Lowbyte genuegen
+ 1078                                          ; zwei RRCA und AND #c0: Nur die untersten zwei Bits von z landen oben.
+ 1079                                          ; Das Highbyte erhaelt z >> 2 plus das Highbyte der 256-Byte-ausgerichteten
+ 1080                                          ; Karte. Beispiel z=5: Offset #0140, Low=#40, High-Zuschlag=1.
+ 1081                                          ; Die Projektionszeile enthaelt 64 Hoehenwerte je Tiefe. BC waechst daher
+ 1082                                          ; um 64; bei Lowbyte-Ueberlauf erhoeht INC B explizit das Highbyte.
+ 1083 4783                                     terrain_prepare_depth:
+ 1084 4783    3A CD 48                04               ld a,(terrain_camera)
+ 1085 4786    FD 86 00                05               add a,(iy+0)
+ 1086 4789    E6 3F                   02               and 63
+ 1087 478B    5F                      01               ld e,a
+ 1088 478C    0F                      01               rrca
+ 1089 478D    0F                      01               rrca
+ 1090 478E    E6 C0                   02               and #c0
+ 1091 4790    77                      02               ld (hl),a
+ 1092 4791    23                      02               inc hl
+ 1093 4792    7B                      01               ld a,e
+ 1094 4793    CB 3F                   02               srl a
+ 1095 4795    CB 3F                   02               srl a
+ 1096 4797    C6 60                   02               add a,terrain_map/256
+ 1097 4799    77                      02               ld (hl),a
+ 1098 479A    23                      02               inc hl
+ 1099 479B    71                      02               ld (hl),c
+ 1100 479C    23                      02               inc hl
+ 1101 479D    70                      02               ld (hl),b
+ 1102 479E    23                      02               inc hl
+ 1103 479F    79                      01               ld a,c
+ 1104 47A0    C6 40                   02               add 64
+ 1105 47A2    4F                      01               ld c,a
+ 1106 47A3    30 01                   02               jr nc,terrain_projection_page
+ 1107 47A5    04                      01               inc b
+ 1108 47A6                                     terrain_projection_page:
+ 1109 47A6    FD 23                   03               inc iy
+ 1110 47A8    3A D1 48                04               ld a,(terrain_count)
+ 1111 47AB    3D                      01               dec a
+ 1112 47AC    32 D1 48                04               ld (terrain_count),a
+ 1113 47AF    20 D2                   02               jr nz,terrain_prepare_depth
+ 1114 47B1    C9                      03               ret
+ 1115                                          
+ 1116                                          ; EINE SPALTE VON NAH NACH FERN. Hauptregister:
+ 1117                                          ; HL = aktuelles Zielpixel (wir zeichnen von unten nach oben),
+ 1118                                          ; DE = nacheinander Kartenadresse, Projektionsadresse, Farbadresse;
+ 1119                                          ; B = Zahl der zu zeichnenden Vierergruppen, C = fertiges Pixelbyte,
+ 1120                                          ; E beim Fuellen = Vierergruppen bis zum naechsten 8-Zeilen-RAM-Sprung.
+ 1121                                          ; Alternativregister: HL' = X-Abtasttabelle, B' = verbleibende Tiefenpunkte.
+ 1122                                          ; EXX tauscht BC/DE/HL mit ihren Alternativen; A und Flags wechseln NICHT.
+ 1123                                          ; IXL haelt kurz die Abschnittslaenge. IX ist in dieser Szene kein Zeiger.
+ 1124                                          ; 
+ 1125                                          ; terrain_samples hat 16 Bytes je Bildspalte. Vier ADD HL,HL bilden
+ 1126                                          ; Spalte*16. PUSH HL, EXX, POP HL uebertraegt den Zeiger nach HL'.
+ 1127                                          ; terrain_top=128 bedeutet: Bisher verdeckt noch kein naher Huegel die Spalte.
+ 1128                                          ; Fenster: Byte-Spalten 8..71, Bildschirmzeilen 48..175. Start unten:
+ 1129                                          ; Offset(175)=#3e90; +8+Spalte ergibt Lowbyte #98+Spalte (kein Ueberlauf).
+ 1130                                          ; 
+ 1131                                          ; SP-TRICK: Vor dem Umstellen speichert LD (restore_terrain_sp+1),SP
+ 1132                                          ; den normalen Stackwert direkt in die beiden Operandenbytes von LD SP,nn.
+ 1133                                          ; Das Opcodebyte bleibt unveraendert. Der Code muss deshalb im RAM liegen.
+ 1134                                          ; Ab LD SP,terrain_state sind CALL, PUSH und RET bis zur Wiederherstellung
+ 1135                                          ; verboten: Sie wuerden die Adressliste oder den Ruecksprung zerstoeren.
+ 1136                                          ; DI sperrt maskierbare Interrupts, aber keinen NMI. Waehrend dieser Phase
+ 1137                                          ; darf eine Erweiterung keinen NMI ausloesen. Jeder POP DE liest zwei Bytes
+ 1138                                          ; und erhoeht SP um 2.
+ 1139 47B2                                     terrain_draw_column:
+ 1140 47B2    3A CC 48                04               ld a,(terrain_column)
+ 1141 47B5    6F                      01               ld l,a
+ 1142 47B6    26 00                   02               ld h,0
+ 1143 47B8    29                      03               add hl,hl
+ 1144 47B9    29                      03               add hl,hl
+ 1145 47BA    29                      03               add hl,hl
+ 1146 47BB    29                      03               add hl,hl
+ 1147 47BC    11 00 78                03               ld de,terrain_samples
+ 1148 47BF    19                      03               add hl,de
+ 1149 47C0    E5                      04               push hl
+ 1150 47C1    D9                      01               exx
+ 1151 47C2    E1                      03               pop hl                  ; HL' laeuft durch die 16 X-Abtastwerte
+ 1152 47C3    06 10                   02               ld b,16                 ; B' ist der Tiefenzaehler
+ 1153 47C5    D9                      01               exx
+ 1154 47C6    3E 80                   02               ld a,128
+ 1155 47C8    32 CE 48                04               ld (terrain_top),a
+ 1156 47CB    3A CC 48                04               ld a,(terrain_column)
+ 1157 47CE    C6 98                   02               add #98                 ; y=175: Offset #3e90 plus linker Rand 8
+ 1158 47D0    6F                      01               ld l,a
+ 1159 47D1    3A C6 48                04               ld a,(back_page)
+ 1160 47D4    F6 3E                   02               or #3e
+ 1161 47D6    67                      01               ld h,a
+ 1162 47D7    ED 73 40 48             06               ld (restore_terrain_sp+1),sp ; Rueckkehr-Stack in den LD-SP-Operanden schreiben
+ 1163 47DB    31 00 B8                03               ld sp,terrain_state       ; ab jetzt zeigt SP auf die Adressliste statt auf Rueckspruenge
+ 1164                                          ; X = (Kamera-X + vorberechneter seitlicher Abstand) modulo 64.
+ 1165                                          ; POP DE liefert die Kartenzeile. Ihre unteren sechs Adressbits sind null,
+ 1166                                          ; daher verbindet OR E Zeilenbasis und X ohne Carry: gleichwertig zu +X.
+ 1167                                          ; Das gelesene Hoehenbyte liegt in 0..63. Der zweite POP liefert die ebenso
+ 1168                                          ; auf 64 Bytes ausgerichtete Projektionszeile; OR E fuegt die Hoehe hinzu.
+ 1169                                          ; Die Projektionstabelle erspart der CPU die Division durch Entfernung:
+ 1170                                          ; y = clamp(4*round((20 + (55-Hoehe)*80/Tiefe)/4), 0, 128).
+ 1171                                          ; Alle y-Werte sind Vielfache von vier. 55 ist die Kamerahoehe im Generator.
+ 1172                                          ; 
+ 1173                                          ; terrain_top ist die obere Grenze des bereits gefuellten unteren Abschnitts.
+ 1174                                          ; Ist y >= terrain_top, verdeckt ein naeherer Punkt diesen Fernpunkt.
+ 1175                                          ; Sonst zeichnen wir [y, terrain_top), also genau (terrain_top-y)/4 Gruppen.
+ 1176                                          ; Zwei SRL teilen durch vier. IXL bewahrt die Laenge ohne Stackzugriff.
+ 1177                                          ; Der neue terrain_top-Wert ist y. Die Farbtabelle hat dasselbe Layout wie
+ 1178                                          ; die Projektion und folgt 1024 Bytes spaeter: D+4 waehlt dieselbe Zelle dort.
+ 1179                                          ; C erhaelt schon ein vollstaendig gepacktes Mode-0-Byte fuer zwei gleiche Pens.
+ 1180 47DE                                     terrain_sample:
+ 1181 47DE    D9                      01               exx
+ 1182 47DF    7E                      02               ld a,(hl)
+ 1183 47E0    D9                      01               exx
+ 1184 47E1    4F                      01               ld c,a
+ 1185 47E2    3A CF 48                04               ld a,(terrain_x)
+ 1186 47E5    81                      01               add a,c
+ 1187 47E6    E6 3F                   02               and 63
+ 1188 47E8    D1                      03               pop de                  ; Kartenzeile statt langsamer Indexzugriffe
+ 1189 47E9    B3                      01               or e                      ; disjunkte Bitfelder verbinden: Zeilenbasis + Index
+ 1190 47EA    5F                      01               ld e,a
+ 1191 47EB    1A                      02               ld a,(de)               ; tatsaechliche Welthoehe
+ 1192 47EC    D1                      03               pop de                  ; Projektionszeile fuer diese Entfernung
+ 1193 47ED    B3                      01               or e                      ; disjunkte Bitfelder verbinden: Zeilenbasis + Index
+ 1194 47EE    5F                      01               ld e,a
+ 1195 47EF    1A                      02               ld a,(de)               ; projiziertes Y, bereits auf 0..128 begrenzt
+ 1196 47F0    47                      01               ld b,a
+ 1197 47F1    3A CE 48                04               ld a,(terrain_top)
+ 1198 47F4    90                      01               sub b                     ; alte Oberkante minus neues y; Carry/Zero bedeuten verdeckt
+ 1199 47F5    38 41                   02               jr c,terrain_next_depth   ; neues y liegt tiefer: naher Huegel verdeckt es
+ 1200 47F7    28 3F                   02               jr z,terrain_next_depth ; hinter dem bereits sichtbaren Hoehenzug
+ 1201 47F9    CB 3F                   02               srl a                     ; Abschnittslaenge halbieren; zweimal teilen ergibt Vierergruppen
+ 1202 47FB    CB 3F                   02               srl a                   ; vier Rasterzeilen je Hoehenstufe
+ 1203 47FD    DD 6F                   02               ld ixl,a                ; Abschnittslaenge; POP-Lesestrom bleibt unveraendert
+ 1204 47FF    3A CE 48                04               ld a,(terrain_top)
+ 1205 4802    3D                      01               dec a
+ 1206 4803    E6 07                   02               and 7
+ 1207 4805    CB 3F                   02               srl a                     ; Rasterposition innerhalb des 8-Zeilen-Blocks halbieren
+ 1208 4807    CB 3F                   02               srl a                     ; weiter auf Vierergruppen umrechnen
+ 1209 4809    3C                      01               inc a
+ 1210 480A    4F                      01               ld c,a                  ; 1 oder 2 Vierergruppen bis zum 8-Zeilen-Sprung
+ 1211 480B    78                      01               ld a,b
+ 1212 480C    32 CE 48                04               ld (terrain_top),a
+ 1213 480F    7A                      01               ld a,d
+ 1214 4810    C6 04                   02               add 4                   ; Farbtabelle liegt 1024 Bytes hinter Projektion
+ 1215 4812    57                      01               ld d,a
+ 1216 4813    1A                      02               ld a,(de)
+ 1217 4814    59                      01               ld e,c
+ 1218 4815    4F                      01               ld c,a                  ; zwei identische Mode-0-Pixel
+ 1219 4816    DD 45                   02               ld b,ixl                ; Abschnittslaenge in Vierergruppen
+ 1220                                          ; VIER RASTERZEILEN PRO SCHLEIFE. LD (HL),C zeichnet zwei Pixel.
+ 1221                                          ; Innerhalb eines 8-Zeilen-Blocks liegt die vorherige Rasterzeile #0800 Bytes
+ 1222                                          ; niedriger. SUB 8 am Highbyte setzt genau diesen Adressschritt um.
+ 1223                                          ; Nach vier Schreibzugriffen zeigt HL auf die naechste noch freie Zeile.
+ 1224                                          ; E zaehlt bis zum Uebergang von Zeile 0 zur Zeile 7 des vorherigen Blocks.
+ 1225                                          ; Dort muss die Adresse zusaetzlich um #4000-80 korrigiert werden:
+ 1226                                          ; SUB 80 am Lowbyte und SBC A,#c0 am Highbyte addieren zusammen #3fb0.
+ 1227                                          ; SBC uebernimmt den Borrow des Lowbytes. Beispiel relativ zur Seite:
+ 1228                                          ; Nach y=168 wurde #0690 beschrieben; der normale Schritt ergibt #fe90.
+ 1229                                          ; Die Korrektur #3fb0 fuehrt modulo 65536 zu #3e40, der Adresse von y=167.
+ 1230                                          ; B zaehlt Gruppen. DJNZ beeinflusst die Flags nicht; E startet danach mit 2.
+ 1231 4818                                     terrain_span:
+ 1232 4818    71                      02               ld (hl),c
+ 1233 4819    7C                      01               ld a,h
+ 1234 481A    D6 08                   02               sub 8
+ 1235 481C    67                      01               ld h,a
+ 1236 481D    71                      02               ld (hl),c
+ 1237 481E    D6 08                   02               sub 8
+ 1238 4820    67                      01               ld h,a
+ 1239 4821    71                      02               ld (hl),c
+ 1240 4822    D6 08                   02               sub 8
+ 1241 4824    67                      01               ld h,a
+ 1242 4825    71                      02               ld (hl),c
+ 1243 4826    D6 08                   02               sub 8
+ 1244 4828    67                      01               ld h,a
+ 1245 4829    1D                      01               dec e
+ 1246 482A    20 0A                   02               jr nz,terrain_same_row
+ 1247 482C    7D                      01               ld a,l
+ 1248 482D    D6 50                   02               sub 80
+ 1249 482F    6F                      01               ld l,a
+ 1250 4830    7C                      01               ld a,h
+ 1251 4831    DE C0                   02               sbc a,#c0               ; +64 minus Uebertrag der unteren Adresse
+ 1252 4833    67                      01               ld h,a
+ 1253 4834    1E 02                   02               ld e,2
+ 1254 4836                                     terrain_same_row:
+ 1255 4836    10 E0                   04               djnz terrain_span
+ 1256                                          ; EXX macht den Abtastzeiger HL' und Tiefenzaehler B' erreichbar.
+ 1257                                          ; INC HL geht zum naechsten X-Abstand, DEC B setzt das Zero-Flag fuer
+ 1258                                          ; 16 abgearbeitete Punkte. Das folgende EXX erhaelt dieses Flag.
+ 1259                                          ; JP NZ kann deshalb trotz Registerwechsel auf den Tiefenzaehler reagieren.
+ 1260                                          ; Auch verdeckte Punkte haben ihre beiden POPs ausgefuehrt. SP steht
+ 1261                                          ; nach 16 Punkten immer bei #b840; der Lesestrom bleibt synchron.
+ 1262 4838                                     terrain_next_depth:
+ 1263 4838    D9                      01               exx                       ; BC/DE/HL tauschen, Flags und A bleiben unveraendert
+ 1264 4839    23                      02               inc hl                    ; naechsten seitlichen Abtastwert anwaehlen
+ 1265 483A    05                      01               dec b                     ; Tiefenzaehler im alternativen Registersatz vermindern
+ 1266 483B    D9                      01               exx                       ; BC/DE/HL tauschen, Flags und A bleiben unveraendert
+ 1267 483C    C2 DE 47                03               jp nz,terrain_sample      ; Zero-Flag stammt weiterhin von DEC B
+ 1268                                          ; Dieser LD-SP-Operand enthaelt jetzt den vorhin gesicherten echten SP.
+ 1269                                          ; Er zeigt noch auf die Ruecksprungadresse von CALL terrain_draw_column.
+ 1270                                          ; Erst ab hier sind RET und normale Stackzugriffe wieder zulaessig.
+ 1271                                          ; Ueber der hoechsten sichtbaren Kante bleiben terrain_top Rasterzeilen
+ 1272                                          ; Himmel. Wir fuellen sie schwarz, damit das vorige Kamerabild verschwindet.
+ 1273                                          ; Bei terrain_top=0 ist bereits die ganze Spalte fertig. Sonst teilt SRL
+ 1274                                          ; zweimal durch vier; (Gruppenzahl-1) AND 1 plus 1 setzt den RAM-Sprungzaehler.
+ 1275 483F                                     restore_terrain_sp:
+ 1276 483F    31 00 00                03               ld sp,0                 ; selbstmodifiziert; IRQs bleiben deaktiviert
+ 1277 4842    3A CE 48                04               ld a,(terrain_top)
+ 1278 4845    B7                      01               or a
+ 1279 4846    C8                      02               ret z
+ 1280 4847    CB 3F                   02               srl a                     ; Himmelshoehe halbieren; zwei SRL ergeben Gruppenzahl
+ 1281 4849    CB 3F                   02               srl a                     ; Himmelshoehe halbieren; zwei SRL ergeben Gruppenzahl
+ 1282 484B    47                      01               ld b,a
+ 1283 484C    3D                      01               dec a
+ 1284 484D    E6 01                   02               and 1                     ; Restgruppe innerhalb des 8-Rasterzeilen-Blocks
+ 1285 484F    3C                      01               inc a
+ 1286 4850    5F                      01               ld e,a
+ 1287 4851    0E 00                   02               ld c,0                    ; Schwarz fuer beide Mode-0-Pixel
+ 1288                                          ; Gleicher Vierzeilenlauf wie terrain_span, jetzt mit C=0 fuer Schwarz.
+ 1289                                          ; HL setzt nahtlos oberhalb der letzten Landschaftsflaeche fort.
+ 1290                                          ; Jede Spalte erhaelt insgesamt 128 Rasterzeilen: sichtbare Hoehenabschnitte
+ 1291                                          ; und restlichen Himmel. Es gibt keine separate Vollbild-Loeschschleife.
+ 1292 4853                                     terrain_sky:
+ 1293 4853    71                      02               ld (hl),c
+ 1294 4854    7C                      01               ld a,h
+ 1295 4855    D6 08                   02               sub 8
+ 1296 4857    67                      01               ld h,a
+ 1297 4858    71                      02               ld (hl),c
+ 1298 4859    D6 08                   02               sub 8
+ 1299 485B    67                      01               ld h,a
+ 1300 485C    71                      02               ld (hl),c
+ 1301 485D    D6 08                   02               sub 8
+ 1302 485F    67                      01               ld h,a
+ 1303 4860    71                      02               ld (hl),c
+ 1304 4861    D6 08                   02               sub 8
+ 1305 4863    67                      01               ld h,a
+ 1306 4864    1D                      01               dec e
+ 1307 4865    20 0A                   02               jr nz,terrain_sky_row
+ 1308 4867    7D                      01               ld a,l
+ 1309 4868    D6 50                   02               sub 80
+ 1310 486A    6F                      01               ld l,a
+ 1311 486B    7C                      01               ld a,h
+ 1312 486C    DE C0                   02               sbc a,#c0
+ 1313 486E    67                      01               ld h,a
+ 1314 486F    1E 02                   02               ld e,2
+ 1315 4871                                     terrain_sky_row:
+ 1316 4871    10 E0                   04               djnz terrain_sky
+ 1317 4873    C9                      03               ret
+ 1318                                          
+ 1319                                          ; Der LZ48-Entpacker nutzt IXL als Token-Register. Das ist hier ein
+ 1320                                          ; konkreter Einsatz einer undokumentierten Z80-Indexhaelfte.
+ 1321                                          ; ENTPACKEN: Eingabe HL=komprimierte Quelle, DE=Ziel. Veraendert AF,
+ 1322                                          ; BC, DE, HL und IXL. IX als ganzer Zeiger ist danach ebenfalls veraendert.
+ 1323                                          ; Der Entpacker kopiert zuerst ein Literalbyte. Danach steuert ein Token
+ 1324                                          ; Literal-Laenge (oberes Halbbyte) und Wiederholungslaenge (unteres Halbbyte).
+ 1325                                          ; Zusatzbytes verlaengern diese Laengen; Matches haben mindestens 3 Bytes.
+ 1326                                          ; Ein Offsetbyte verweist auf schon erzeugte Zielbytes. Vorwaerts-LDIR
+ 1327                                          ; erlaubt dabei ueberlappende Kopien fuer wiederholte Muster.
+ 1328                                          ; Offsetbyte #ff wird durch INC A zu null und beendet den Strom per RET Z.
+ 1329                                          ; Der Entpacker speichert das Token in IXL, waehrend A Laengen berechnet.
+ 1330                                          ; Er liefert DE auf das Byte hinter der Ausgabe und HL auf das Endbyte
+ 1331                                          ; der Quelle. Die Aufrufer setzen ihre anderen Arbeitsregister danach neu.
+ 1332                                          ; Die Originaldatei bleibt eingebunden; unsere Erlaeuterung aendert sie nicht.
+ 1333                                                  include '../tools/rasm/decrunch/lz48decrunch_v006b.asm'
+ 1334                                          ; VERAENDERLICHER ZUSTAND. Bytewerte folgen als DB, Wortwerte als DW.
+ 1335                                          ; Tests erlauben Aenderungen genau bis mutable_end sowie an den beiden
+ 1336                                          ; Operandenbytes von restore_terrain_sp. Alle anderen Programmdaten
+ 1337                                          ; muessen waehrend der Show unveraendert bleiben.
+ 1338 48BA    0F                      01       volume_limit:   db 15             ; Obergrenze 0..15 fuer alle Musikpegel
+ 1339 48BB    00                      01       scene:          db 0              ; aktuelle Szene 0..6
+ 1340 48BC                                     scene_frame:    dw 0              ; Videoframes seit Szenenbeginn, 16 Bit
+ 1341 48BE    00                      01       phase:          db 0              ; globaler Animationszaehler, Umlauf nach 256
+ 1342 48BF    00                      01       finished:       db 0              ; 1 nach Schlussakkord und letztem Szenenframe
+ 1343 48C0    00                      01       beat_frame:     db 0              ; 0..7 innerhalb eines Notenschritts
+ 1344 48C1    00                      01       song_step:      db 0              ; 0..127 in der Notentabelle
+ 1345 48C2    00                      01       wave_index:     db 0              ; Sinusphase innerhalb des Spiegelungsfensters
+ 1346 48C3    00                      01       rows_left:      db 0              ; gemeinsamer Arbeitszaehler fuer Zeilenschleifen
+ 1347 48C4    00                      01       moire_row:      db 0              ; naechste Musterzeile 0..127
+ 1348 48C5    00                      01       moire_phase:    db 0              ; Verformungsphase; +3 je fertigem Musterbild
+ 1349 48C6    00                      01       back_page:      db 0              ; Highbyte der unsichtbaren Seite: #00 oder #c0
+ 1350 48C7                                     scroll_pos:     dw 0              ; Byteoffset der naechsten Sieben-Byte-Schriftspalte
+ 1351 48C9                                     scene_length:   dw 0              ; Sollzahl der Frames fuer die aktuelle Szene
+ 1352 48CB    00                      01       road_phase:     db 0              ; Fahrbahnphase 0..31
+ 1353 48CC    00                      01       terrain_column: db 0              ; naechste Spalte 0..63 auf der Arbeitsseite
+ 1354 48CD    00                      01       terrain_camera: db 0              ; Kamera-Z / Tabellenphase 0..63
+ 1355 48CE    00                      01       terrain_top:    db 0              ; erste bereits gefuellte Zeile, relativ zum Fenster
+ 1356 48CF    00                      01       terrain_x:      db 0              ; seitliche Kameraposition aus terrain_track
+ 1357 48D0    00                      01       terrain_batch:  db 0              ; noch zu zeichnende Spalten dieses Frames, anfangs 8
+ 1358 48D1    00                      01       terrain_count:  db 0              ; Tiefenpunkte bei der Adressvorbereitung, anfangs 16
+ 1359                                          ; Ab hier folgen unveraenderliche Tabellen. Die Szenenlaengen ergeben
+ 1360                                          ; zusammen 3072 Videoframes; Entpackpausen kommen zur Showdauer hinzu.
+ 1361 48D2                                     mutable_end:
+ 1362 48D6    4F 4B                   06       lake_colors:    db #44,#58,#5d,#4d,#4f,#4b
+ 1363 48D8                                     scene_lengths:  dw 384,384,512,512,128,512,640
+ 1364 48F2    5D 5B 4F 4B             16       terrain_palette: db #54,#44,#55,#46,#56,#5a,#59,#52,#5e,#43,#4b,#58,#5d,#5b,#4f,#4b
+ 1365 48FA    4D 4D 4D 4D             08       road_colors:    db #4b,#4b,#4b,#4b,#4d,#4d,#4d,#4d
+ 1366 4902    4D 4D 4D 4D             08                       db #4b,#4b,#4b,#4b,#4d,#4d,#4d,#4d
+ 1367                                          ; CRTC-REGISTERWERTE IN REIHENFOLGE R0..R13:
+ 1368                                          ; R0=63: 64 Zeichenzeiten je Zeile; R1=40: 40 sichtbar (=80 Bytes).
+ 1369                                          ; R2=46: horizontale Syncposition; R3=#8e: Syncbreiten, CRTC-abhaengige Wirkung.
+ 1370                                          ; R4=38: 39 Zeichenzeilen gesamt; R5=0: keine zusaetzlichen Rasterzeilen.
+ 1371                                          ; R6=0: anfangs unsichtbar; R7=30: vertikale Syncposition.
+ 1372                                          ; R8=0: regulare progressive Darstellung ohne Interlace/Skew.
+ 1373                                          ; R9=7: acht Rasterzeilen je Zeichenzeile; 39*8 ergibt 312 Gesamtzeilen.
+ 1374                                          ; R10/R11=0: Cursorparameter, fuer diese Bitmapdarstellung ohne Nutzen.
+ 1375                                          ; R12=#30, R13=0: Bildstart auf CPU-RAM-Seite #c000.
+ 1376 4912    30 00                   14       crtc_defaults:  db 63,40,46,142,38,0,0,30,0,7,0,0,48,0
+ 1377 4914                                     initial_palette: incbin '../assets/palette.bin'
+ 1378 4928    4B 4F 5D 58             08       floor_colors:   db #44,#58,#5d,#4f,#4b,#4f,#5d,#58
+ 1379 4930    4B 4F 5D 58             08                       db #44,#58,#5d,#4f,#4b,#4f,#5d,#58
+ 1380 4938    4B 4F 5D 58             08                       db #44,#58,#5d,#4f,#4b,#4f,#5d,#58
+ 1381 493C                                     lead_notes:     incbin '../assets/lead.bin'
+ 1382 4A3C                                     bass_notes:     incbin '../assets/bass.bin'
+ 1383                                          ; 224 Zeilenoffsets als Little-Endian-Woerter. Die gemeinsame Formel
+ 1384                                          ; steht im Dateikopf. Die Seite wird erst beim Zeichnen per OR ergaenzt.
+ 1385                                          ; Die zusaetzlichen 24 Eintraege ueber 200 hinaus bleiben hier unbenutzt.
+ 1386 4B3C                                     row_addresses:  incbin '../assets/rows.bin'
+ 1387 4CFC                                     pictures:       dw picture,lake_picture,drive_picture,terrain_picture,split_picture,phase_picture,finale_picture
+ 1388                                                  include '../assets/sizes.asm'
+ 1389                                                  align 256
+ 1390                                          ; ALIGN 256 davor richtet light_table auf eine volle Seite aus.
+ 1391                                          ; light_table und sine_table belegen je 256 Bytes. Deshalb liegen auch
+ 1392                                          ; moire_patterns und die folgenden ganzen Tabellen auf Seitengrenzen.
+ 1393                                          ; LD H,Tabelle/256 plus LD L,Index ersetzt eine 16-Bit-Addition.
+ 1394 4E00                                     light_table:    incbin '../assets/light.bin'
+ 1395 4F00                                     sine_table:     incbin '../assets/sine.bin'
+ 1396 5000                                     moire_patterns: incbin '../assets/moire.bin'
+ 1397                                          ; Statische Geometrie- und Projektionstabellen; keine Videoframes.
+ 1398                                          ; GEOMETRIEDATEN. Karte: 64*64 Hoehenbytes; Projektion/Farbe: je 16*64.
+ 1399                                          ; X-Abtastung: 64 Spalten * 16 Tiefen = 1024 Bytes, signed Abstaende modulo 64.
+ 1400                                          ; Farbtabelle und Projektion muessen exakt 1024 Bytes auseinanderliegen,
+ 1401                                          ; weil terrain_sample allein D um 4 erhoeht. ASSERTs unten pruefen das.
+ 1402 6000                                     terrain_map:    incbin '../assets/terrain-map.bin'
+ 1403 7000                                     terrain_projection: incbin '../assets/terrain-projection.bin'
+ 1404 7400                                     terrain_colours: incbin '../assets/terrain-colours.bin'
+ 1405 7800                                     terrain_samples: incbin '../assets/terrain-samples.bin'
+ 1406 7C00                                     terrain_depths: incbin '../assets/terrain-depths.bin'
+ 1407 7C10                                     terrain_track:  incbin '../assets/terrain-track.bin'
+ 1408                                          ; KOMPRIMIERTE SZENENDATEN. INCL48 ist eine Assemblerfunktion:
+ 1409                                          ; RASM liest die Datei und legt ihren LZ48-Strom im Programm ab.
+ 1410                                          ; LZ48_decrunch expandiert diesen Strom erst auf dem CPC. Die *.rle-Dateien
+ 1411                                          ; des Grafikgenerators gehoeren nicht zu diesem Ladepfad.
+ 1412                                          ; Sieben Motive entpacken jeweils nach #c000; road/water/scroll nach #0000.
+ 1413 7C50                                     picture:        incl48 '../assets/title.scr'
+ 1414 864E                                     lake_picture:   incl48 '../assets/lake.scr'
+ 1415 8C14                                     drive_picture:  incl48 '../assets/drive.scr'
+ 1416 9306                                     terrain_picture: incl48 '../assets/terrain.scr'
+ 1417 94C2                                     split_picture:  incl48 '../assets/split.scr'
+ 1418 9BDD                                     phase_picture:  incl48 '../assets/phase.scr'
+ 1419 9F55                                     finale_picture: incl48 '../assets/finale.scr'
+ 1420 A94D                                     road_packed:    incl48 '../assets/road.bin'
+ 1421 AD3D                                     water_packed:   incl48 '../assets/water.bin'
+ 1422 AEEF                                     scroll_packed:  incl48 '../assets/scroll.bin'
+ 1423                                          ; ENDE EXKLUSIV. Die Laenge ist program_end-start; hier folgt kein Datenbyte.
+ 1424                                          ; Die ASSERTs brechen den Build ab, falls Code in die Adressliste reicht
+ 1425                                          ; oder eine schnelle Tabellenadressierung ihre Ausrichtungsannahme verliert.
+ 1426                                          ; SAVE erzeugt dieselben Nutzbytes als BIN sowie in CPC-Bandbloecken im CDT.
+ 1427                                          ; RUN #4000 legt die Startadresse fuer das erzeugte Programm fest.
+ 1428 B08D                                     program_end:
+ 1429                                                  assert program_end < #b800
+ 1430                                                  assert (terrain_map & 255) == 0
+ 1431                                                  assert (terrain_projection & 255) == 0
+ 1432                                                  assert terrain_colours-terrain_projection == 1024
+ 1433                                                  assert terrain_samples-terrain_colours == 1024
+ 1434                                                  save '../build/phosphor464.bin',start,program_end-start
+ 1435                                                  save 'PHOSPHOR.BIN',start,program_end-start,TAPE,'../build/phosphor464.cdt'
+
+ANHANG: LZ48-Entpacker von Edouard Berge
+Registervertrag und Algorithmus stehen am INCLUDE im Hauptquelltext.
+Originaldatei: tools/rasm/decrunch/lz48decrunch_v006b.asm
+
+    1 ;
+    2 ; LZ48 decrunch
+    3 ;
+    4 
+    5 ; In	; HL=compressed data address
+    6 ; 	; DE=output data address
+    7 ; Out	; HL    last address of compressed data read (you must inc once for LZ48 stream)
+    8 ;	; DE    last address of decrunched data write +1
+    9 ;	; BC    always 3
+   10 ;	; A     always zero
+   11 ;	; IXL   undetermined
+   12 ;	; flags (inc a -> 0)
+   13 ; Modif	; AF, BC, DE, HL, IXL
+   14 LZ48_decrunch
+   15 	ldi
+   16 	ld b,0
+   17 
+   18 nextsequence
+   19 	ld a,(hl)
+   20 	inc hl
+   21 	cp #10
+   22 	jr c,lzunpack ; no literal bytes
+   23 	ld ixl,a
+   24 	and #f0
+   25 	rrca
+   26 	rrca
+   27 	rrca
+   28 	rrca
+   29 
+   30 	cp 15 ; more bytes for literal length?
+   31 	jr nz,copyliteral
+   32 getadditionallength
+   33 	ld c,(hl) ; get additional literal length byte
+   34 	inc hl
+   35 	add a,c ; compute literal length total
+   36 	jr nc,lengthNC
+   37 	inc b
+   38 lengthNC
+   39 	inc c
+   40 	jr z,getadditionallength ; if last literal length byte was 255, we have more bytes to process
+   41 copyliteral
+   42 	ld c,a
+   43 	ldir
+   44 	ld a,ixl
+   45 	and #F
+   46 lzunpack
+   47 	add 3
+   48 	cp 18 ; more bytes for match length?
+   49 	jr nz,readoffset
+   50 getadditionallengthbis
+   51 	ld c,(hl) ; get additional match length byte
+   52 	inc hl
+   53 	add a,c ; compute match length size total
+   54 	jr nc,lengthNCbis
+   55 	inc b
+   56 lengthNCbis
+   57 	inc c
+   58 	jr z,getadditionallengthbis ; if last match length byte was 255, we have more bytes to process
+   59 
+   60 readoffset
+   61 	ld c,a
+   62 ; read encoded offset
+   63 	ld a,(hl)
+   64 	inc a
+   65 	ret z ; LZ48 end with zero offset
+   66 	inc hl
+   67 	push hl
+   68 ; source=dest-copyoffset
+   69 	; A != 0 here
+   70 	neg
+   71 	ld l,a
+   72 	ld h,#ff
+   73 	add hl,de
+   74 copykey
+   75 	ldir
+   76 
+   77 	pop hl
+   78 	jr nextsequence
