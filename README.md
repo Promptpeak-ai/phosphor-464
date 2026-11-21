@@ -33,6 +33,12 @@ The full show runs for almost 64 seconds across seven scenes, with original grap
 
 **Every byte has a job.** The current program, including compressed graphics and tables, occupies 28,813 bytes. It reuses the lower 16 KiB of RAM for different scenes and screen buffers after switching off the ROMs. The demo uses no memory expansion.
 
+## Read the annotated assembler
+
+The [complete Z80 source](src/phosphor464.asm) contains detailed German comments about the memory map, registers, I/O ports and the individual effects. The [annotated machine listing](listings/phosphor464-kommentiert.lst) places those comments beside source line numbers, addresses and resolved bytes. It also includes the LZ48 decompressor as an appendix.
+
+For a guided route through the code, start with [initialisation](src/phosphor464.asm#L70) and the [frame loop](src/phosphor464.asm#L107), then follow the [raster effect](src/phosphor464.asm#L445), [AY music player](src/phosphor464.asm#L790) and [terrain renderer](src/phosphor464.asm#L1010). The listing represents the same source snapshot; binary assets and the build tools are not included in this repository.
+
 ## Test status
 
 The current version has passed 21 scene tests in AMSpiriT Lite, covering CRTC types 0, 1 and 2. The complete terrain flight was checked against a reference renderer, and the CPC firmware loaded and started the tape image in the emulator. Original hardware, the physical tape adapter and the colour monitor still need testing.
